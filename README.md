@@ -2,16 +2,16 @@
 A simple example of an HTTP server written in c.
 # Usage
 To run it as is you would just clone the repository like so
-```
-clone https://github.com/eric-livezey/simple-http-server.git
-```
+
+    git clone https://github.com/eric-livezey/simple-http-server.git
+
 then navigate to the directory and run
-```
-make
-```
+
+    make
+
 lastly, execute the file
-```
-./server
-```
+
+    ./server
+
 You should then be able to view the contents of `index.html` by visiting `http://localhost:8000/` in a browser.
 You can change the port by going to `server.c` and changing `#define PORT 8000` on line 14 to `#define PORT {DESIRED_PORT}`
