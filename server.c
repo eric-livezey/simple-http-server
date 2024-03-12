@@ -122,9 +122,8 @@ void handle(int connfd)
     if (HTTP_parserequest(buff, &req) == NULL)
     {
         res.code = 400; /* Bad Request */
-        res.reason = HTTP_reason(res.code);
     }
-    else if (strcmp(req.path, "/") == 0)
+    else if (strcmp(req.path, "/") == 0) /* PATHS */
     {
         if (strcmp(req.method, "GET") == 0)
         {
@@ -133,16 +132,15 @@ void handle(int connfd)
         else
         {
             res.code = 405; /* Method Not Allowed */
-            res.reason = HTTP_reason(res.code);
         }
     }
     else
     {
         res.code = 404; /* Not Found */
-        res.reason = HTTP_reason(res.code);
         res.body = calloc(1, sizeof(char));
         res.content_length = 0;
     }
+    res.reason = HTTP_reason(res.code);
     HTTP_response(connfd, &res);
     printf("\r\n");
     /* cleanup */
