@@ -136,42 +136,6 @@ void handle(int connfd)
             res.reason = HTTP_reason(res.code);
         }
     }
-    else if (strcmp(req.path, "/favicon.ico") == 0)
-    {
-        if (strcmp(req.method, "GET") == 0)
-        {
-            HTTP_filerequest(&res, "./favicon.svg", "image/svg+xml", req.headers);
-        }
-        else
-        {
-            res.code = 405; /* Method Not Allowed */
-            res.reason = HTTP_reason(res.code);
-        }
-    }
-    else if (strcmp(req.path, "/innertube.js") == 0)
-    {
-        if (strcmp(req.method, "GET") == 0)
-        {
-            HTTP_filerequest(&res, "./innertube.js", "application/javascript", req.headers);
-        }
-        else
-        {
-            res.code = 405; /* Method Not Allowed */
-            res.reason = HTTP_reason(res.code);
-        }
-    }
-    else if (strcmp(req.path, "/audio.mp3") == 0)
-    {
-        if (strcmp(req.method, "GET") == 0)
-        {
-            HTTP_filerequest(&res, "./audio.mp3", "audio/mpeg", req.headers);
-        }
-        else
-        {
-            res.code = 405; /* Method Not Allowed */
-            res.reason = HTTP_reason(res.code);
-        }
-    }
     else
     {
         res.code = 404; /* Not Found */
