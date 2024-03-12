@@ -1,7 +1,7 @@
 # Simple HTTP Server
 A simple example of an HTTP server written in c.
 # Usage
-To run it as is you would juts clone the repository
+To run it as is you would just clone the repository like so
 ```
 clone https://github.com/eric-livezey/simple-http-server.git
 ```
