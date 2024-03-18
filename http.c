@@ -295,6 +295,9 @@ char *HTTP_resmsg(HTTP_response_t *res, char *result)
             len += sprintf(result + len, "%s: %s\r\n", es[i]->key, es[i]->value);
     }
     strcat(result, "\r\n");
+
+    printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", result); /* print response (excluding body) */
+
     len += 2;
     if (res->body != NULL) /* body */
         memcpy(result + len, res->body, res->content_length);
@@ -316,7 +319,7 @@ long HTTP_response(int fd, HTTP_response_t *res)
         time(&timer);
         struct tm t;
         gmtime_r(&timer, &t);
-        HTTP_date_r(&t, (char *)&date);
+        HTTP_date_r(&t, date);
         hashmap_put(&headers, "Date", date);
     }
     char content_length[numlenul(res->content_length)];
@@ -332,5 +335,6 @@ long HTTP_response(int fd, HTTP_response_t *res)
     char msg[len];
     HTTP_resmsg(res, msg);
     res->headers = (hashmap_t *)temp;
+
     return write(fd, msg, len);
 }
