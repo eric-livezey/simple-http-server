@@ -27,19 +27,21 @@ unsigned long *HTTP_parserange(char *range, unsigned long size)
     if (temp - range == 0) /* the '-' is at the beginning meaning first pos is 0 */
         ret[0] = 0;
     else
-    {                                                    /* first position is specified */
-        if (strspn(range, "0123456789") != temp - range) /* first position must be an integer */
+    { /* first position is specified */
+        char *endptr;
+        ret[0] = strtoul(range, &endptr, 10);
+        if (endptr[0] != '\0') /* first position is not an integer */
             return NULL;
-        ret[0] = strtoul(range, NULL, 10);
     }
     range = temp + 1;
     if (range[0] == '\0') /* the '-' is at the end meaning last pos is SIZE */
         ret[1] = size;
     else
-    {                                                     /* last position is specified */
-        if (strspn(range, "0123456789") != strlen(range)) /* last position must be an integer */
+    { /* last position is specified */
+        char *endptr;
+        ret[1] = strtoul(range, &endptr, 10);
+        if (endptr[0] != '\0') /* last position is not an integer */
             return NULL;
-        ret[1] = strtoul(range, NULL, 10);
     }
     return ret;
 }
@@ -65,7 +67,7 @@ void HTTP_filerequest(HTTP_response_t *response, char *path, char *content_type,
         char *v;
         unsigned long *range = HTTP_parserange(rangeh, size);
         if (range == NULL || range[0] < 0 || range[0] >= size || range[1] < range[0])
-        {                    /* invalid range */
+        {                         /* invalid range */
             response->code = 416; /* Range Not Satisfiable */
             v = malloc((9 + numlenul(size)) * sizeof(char));
             v[0] = '\0';
@@ -85,9 +87,7 @@ void HTTP_filerequest(HTTP_response_t *response, char *path, char *content_type,
             response->content_length = range[1] - range[0] + 1;
         }
         if (range != NULL)
-        {
             free(range);
-        }
         hashmap_put(response->headers, "Content-Range", v);
         fclose(f);
     }
@@ -105,35 +105,30 @@ void handle(int connfd)
 {
     char buff[MAX];
     int n = recv(connfd, buff, sizeof(buff), 0);
-    printf("================ REQUEST  ================\n\n");
+
+    printf("================ REQUEST  ================\r\n\r\n");
     if (n < 0)
     {
-        printf("RECV ERROR\n\n");
+        printf("RECV ERROR\r\n\r\n");
         return;
     }
     if (n == 0)
-        printf("EMPTY REQUEST\n\n");
+        printf("EMPTY REQUEST\r\n\r\n");
     else
         write(STDOUT_FILENO, buff, n);
+
     HTTP_response_t res;
     memset(&res, 0, sizeof(HTTP_response_t));
     res.protocol = "HTTP/1.1";
     HTTP_request_t req;
+    /* PATHS */
     if (HTTP_parserequest(buff, &req) == NULL)
-    {
         res.code = 400; /* Bad Request */
-    }
-    else if (strcmp(req.path, "/") == 0) /* PATHS */
-    {
+    else if (strcmp(req.path, "/") == 0)
         if (strcmp(req.method, "GET") == 0)
-        {
             HTTP_filerequest(&res, "./index.html", "text/html", req.headers);
-        }
         else
-        {
             res.code = 405; /* Method Not Allowed */
-        }
-    }
     else
     {
         res.code = 404; /* Not Found */
@@ -142,7 +137,7 @@ void handle(int connfd)
     }
     res.reason = HTTP_reason(res.code);
     HTTP_response(connfd, &res);
-    printf("\r\n");
+
     /* cleanup */
     HTTP_request_destroy(&req);
     if (res.headers != NULL)
@@ -156,16 +151,34 @@ void handle(int connfd)
 
 void *thread_main(void *arg)
 {
-    int connfd = *((int *)arg);
-    handle(connfd);
+    handle(*((int *)arg));
     return NULL;
 }
 
-int main(int argc, char *argv)
+int main(int argc, char **argv)
 {
+    unsigned short port;
     int sockfd, connfd, len, i;
     struct sockaddr_in serv, cli;
 
+    if (argc < 2)
+        port = PORT;
+    else if (argc > 2)
+    {
+        printf("too many arguments\n");
+        exit(EXIT_FAILURE);
+    }
+    else
+    {
+        char *endptr = NULL;
+        port = (unsigned short)strtol(argv[1], &endptr, 10);
+        if (endptr[0] != '\0')
+        {
+            printf("invalid port\n");
+            printf("%s\n", endptr);
+            exit(EXIT_FAILURE);
+        }
+    }
     /* create socket */
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1)
@@ -178,9 +191,9 @@ int main(int argc, char *argv)
     /* assign IP, PORT */
     serv.sin_family = AF_INET;
     serv.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv.sin_port = htons(PORT);
+    serv.sin_port = htons(port);
 
-    /* binding newly created socket to given IP and verification */
+    /* bind newly created socket to given IP and verification */
     if ((bind(sockfd, (struct sockaddr *)&serv, sizeof(serv))) != 0)
     {
         printf("socket bind failed\n");
@@ -191,10 +204,7 @@ int main(int argc, char *argv)
         int n = 16;
         /* now server is ready to listen and verification */
         if ((listen(sockfd, n)) != 0)
-        {
             printf("Listen failed\n");
-            // continue;
-        }
         len = sizeof(cli);
         pthread_t threads[n];
         int conns[n];
