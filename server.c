@@ -30,7 +30,7 @@ unsigned long *HTTP_parserange(char *range, unsigned long size)
     { /* first position is specified */
         char *endptr;
         ret[0] = strtoul(range, &endptr, 10);
-        if (endptr[0] != '\0') /* first position is not an integer */
+        if (*range == '\0' || *endptr != '-') /* first position is not an integer */
             return NULL;
     }
     range = temp + 1;
@@ -40,7 +40,7 @@ unsigned long *HTTP_parserange(char *range, unsigned long size)
     { /* last position is specified */
         char *endptr;
         ret[1] = strtoul(range, &endptr, 10);
-        if (endptr[0] != '\0') /* last position is not an integer */
+        if (*range == '\0' || *endptr != '\0') /* last position is not an integer */
             return NULL;
     }
     return ret;
@@ -172,7 +172,7 @@ int main(int argc, char **argv)
     {
         char *endptr = NULL;
         port = (unsigned short)strtol(argv[1], &endptr, 10);
-        if (endptr[0] != '\0')
+        if (*argv[1] == '\0' || *endptr != '\0')
         {
             printf("invalid port\n");
             printf("%s\n", endptr);
