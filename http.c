@@ -335,6 +335,5 @@ long HTTP_response(int fd, HTTP_response_t *res)
     char msg[len];
     HTTP_resmsg(res, msg);
     res->headers = (hashmap_t *)temp;
-
     return write(fd, msg, len);
 }
