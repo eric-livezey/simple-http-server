@@ -46,13 +46,13 @@ unsigned long *HTTP_parserange(char *range, unsigned long size)
     return ret;
 }
 
-void HTTP_filerequest(HTTP_response_t *response, char *path, char *content_type, hashmap_t *headers)
+void HTTP_filerequest(HTTP_response *response, char *path, char *content_type, hashmap *headers)
 {
     response->protocol = "HTTP/1.1";
     if (response->headers == NULL)
     {
-        response->headers = malloc(sizeof(hashmap_t));
-        hashmap_init(response->headers);
+        response->headers = malloc(sizeof(hashmap));
+        hashmap_init(response->headers, 1);
     }
     hashmap_put(response->headers, "Accept-Ranges", "bytes");
     hashmap_put_if_absent(response->headers, "Cache-Control", "no-cache");
@@ -117,10 +117,10 @@ void handle(int connfd)
     else
         write(STDOUT_FILENO, buff, n);
 
-    HTTP_response_t res;
-    memset(&res, 0, sizeof(HTTP_response_t));
+    HTTP_response res;
+    memset(&res, 0, sizeof(HTTP_response));
     res.protocol = "HTTP/1.1";
-    HTTP_request_t req;
+    HTTP_request req;
     /* PATHS */
     if (HTTP_parserequest(buff, &req) == NULL)
         res.code = 400; /* Bad Request */
@@ -131,22 +131,38 @@ void handle(int connfd)
             res.code = 405; /* Method Not Allowed */
     else
     {
-        res.code = 404; /* Not Found */
-        res.body = calloc(1, sizeof(char));
-        res.content_length = 0;
+        short size = strlen(req.path) + 1;
+        char path[size + 1];
+        path[0] = '.';
+        for (int i = 0; i < size + 1; i++)
+            path[i + 1] = req.path[i];
+        /* is it a valid file? */
+        if (access(path, R_OK) == 0 && strcmp(path + size - 2, ".c") != 0 && strcmp(path + size - 2, ".h") != 0 && strcmp(path + size - 3, ".md") != 0 && strcmp(path + 2, "server") != 0 && strcmp(path + 2, "Makefile") != 0 && path[2] != '.')
+        {
+            if (strcmp(req.method, "GET") == 0)
+                HTTP_filerequest(&res, path, "*", req.headers);
+            else
+                res.code = 405; /* Method Not Allowed */
+        }
+        else
+        {
+            res.code = 404; /* Not Found */
+            res.body = calloc(1, sizeof(char));
+            res.content_length = 0;
+        }
     }
     res.reason = HTTP_reason(res.code);
-    HTTP_response(connfd, &res);
+    HTTP_send_response(&res, connfd);
 
     /* cleanup */
-    HTTP_request_destroy(&req);
+    HTTP_request_free(&req);
     if (res.headers != NULL)
     {
         char *val;
         if ((val = hashmap_get(res.headers, "Content-Range")) != NULL)
             free(val);
     }
-    HTTP_response_destroy(&res);
+    HTTP_response_free(&res);
 }
 
 void *thread_main(void *arg)
@@ -159,7 +175,7 @@ int main(int argc, char **argv)
 {
     unsigned short port;
     int sockfd, connfd, len, i;
-    struct sockaddr_in serv, cli;
+    struct sockaddr_in server, client;
 
     if (argc < 2)
         port = PORT;
@@ -186,15 +202,15 @@ int main(int argc, char **argv)
         printf("socket creation failed\n");
         exit(EXIT_FAILURE);
     }
-    bzero(&serv, sizeof(serv));
+    bzero(&server, sizeof(server));
 
     /* assign IP, PORT */
-    serv.sin_family = AF_INET;
-    serv.sin_addr.s_addr = htonl(INADDR_ANY);
-    serv.sin_port = htons(port);
+    server.sin_family = AF_INET;
+    server.sin_addr.s_addr = htonl(INADDR_ANY);
+    server.sin_port = htons(port);
 
     /* bind newly created socket to given IP and verification */
-    if ((bind(sockfd, (struct sockaddr *)&serv, sizeof(serv))) != 0)
+    if ((bind(sockfd, (struct sockaddr *)&server, sizeof(server))) != 0)
     {
         printf("socket bind failed\n");
         exit(EXIT_FAILURE);
@@ -205,13 +221,13 @@ int main(int argc, char **argv)
         /* now server is ready to listen and verification */
         if ((listen(sockfd, n)) != 0)
             printf("Listen failed\n");
-        len = sizeof(cli);
+        len = sizeof(client);
         pthread_t threads[n];
         int conns[n];
         for (int i = 0; i < n; i++)
         {
             /* accept the data packet from client and verification */
-            if ((connfd = accept(sockfd, (struct sockaddr *)&cli, &len)) < 0)
+            if ((connfd = accept(sockfd, (struct sockaddr *)&client, &len)) < 0)
             {
                 printf("server accept failed\n");
                 continue;
@@ -229,4 +245,5 @@ int main(int argc, char **argv)
     }
     close(sockfd);
     printf("socket closed\n");
+    exit(EXIT_SUCCESS);
 }
