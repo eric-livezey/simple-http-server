@@ -1,6 +1,6 @@
-#include <ctype.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 #include "utils.h"
 
 #define DEFAULT_INITIAL_CAPACITY (1 << 4)
@@ -11,7 +11,7 @@ typedef struct entry_s
 {
     char *key;
     char *value;
-} entry_t;
+} entry;
 
 typedef struct node_s
 {
@@ -19,11 +19,11 @@ typedef struct node_s
     char *key;
     char *value;
     struct node_s *next;
-} node_t;
+} hashmap_node;
 
 typedef struct hashmap_s
 {
-    entry_t **entryset;
+    entry **entryset;
     char **keyset;
     char **values;
     struct node_s **table;
@@ -32,34 +32,32 @@ typedef struct hashmap_s
     int modcount;
     int threshold;
     float loadfactor;
-} hashmap_t;
+    char ignorecase;
+} hashmap;
 
-int hash(char *s)
+int hash(char *s, char lower)
 {
     int h = 0;
     for (int i = 0; s[i] != '\0'; i++)
-        // case insensitive
-        h = 31 * h + tolower(s[i]);
+        h = 31 * h + lower ? tolower(s[i]) : s[i];
     return h;
 }
 
 int table_size_for(int cap)
 {
     int n = -1 >> (((int)(log2ceil(cap)) - 31) * -1);
-    return (n < 0) ? 1 : (n >= MAXIMUM_CAPACITY) ? MAXIMUM_CAPACITY
-                                                 : n + 1;
+    return (n < 0) ? 1 : (n >= MAXIMUM_CAPACITY) ? MAXIMUM_CAPACITY : n + 1;
 }
 
-int node_init(int hash, char *key, char *value, node_t *next, node_t *node)
+void node_init(int hash, char *key, char *value, hashmap_node *next, hashmap_node *node)
 {
     node->hash = hash;
     node->key = key;
     node->value = value;
     node->next = next;
-    return 0;
 }
 
-int hashmap_init(hashmap_t *hashmap)
+void hashmap_init(hashmap *hashmap, char ignorecase)
 {
     hashmap->entryset = NULL;
     hashmap->keyset = NULL;
@@ -70,10 +68,10 @@ int hashmap_init(hashmap_t *hashmap)
     hashmap->modcount = 0;
     hashmap->loadfactor = DEFAULT_LOAD_FACTOR;
     hashmap->threshold = table_size_for(DEFAULT_INITIAL_CAPACITY);
-    return 0;
+    hashmap->ignorecase = ignorecase;
 }
 
-void hashmap_destroy_cache(hashmap_t *map)
+void hashmap_free_cache(hashmap *map)
 {
     if (map->entryset != NULL)
     {
@@ -94,19 +92,19 @@ void hashmap_destroy_cache(hashmap_t *map)
     }
 }
 
-void hashmap_clear(hashmap_t *map)
+void hashmap_clear(hashmap *map)
 {
-    node_t **tab;
+    hashmap_node **tab;
     map->modcount++;
     if ((tab = map->table) != NULL && map->size > 0)
     {
-        hashmap_destroy_cache(map);
+        hashmap_free_cache(map);
         map->size = 0;
         for (int i = 0; i < map->capacity; i++)
         {
             if (tab[i] != NULL)
             {
-                for (node_t *e = tab[i]; e != NULL; e = e->next)
+                for (hashmap_node *e = tab[i]; e != NULL; e = e->next)
                     free(e);
                 tab[i] = NULL;
             }
@@ -114,23 +112,22 @@ void hashmap_clear(hashmap_t *map)
     }
 }
 
-int hashmap_destroy(hashmap_t *map)
+void hashmap_free_all(hashmap *map)
 {
-    node_t **tab;
+    hashmap_node **tab;
     if ((tab = map->table) != NULL && map->size > 0)
     {
-        hashmap_destroy_cache(map);
+        hashmap_free_cache(map);
         for (int i = 0; i < map->capacity; i++)
             if (tab[i] != NULL)
-                for (node_t *e = tab[i]; e != NULL; e = e->next)
+                for (hashmap_node *e = tab[i]; e != NULL; e = e->next)
                     free(e);
     }
-    return 0;
 }
 
-node_t **hashmap_resize(hashmap_t *map)
+hashmap_node **hashmap_resize(hashmap *map)
 {
-    node_t **oldTab = map->table;
+    hashmap_node **oldTab = map->table;
     int oldCap = (oldTab == NULL) ? 0 : map->capacity;
     int oldThr = map->threshold;
     int newCap, newThr = 0;
@@ -157,14 +154,14 @@ node_t **hashmap_resize(hashmap_t *map)
         newThr = (newCap < MAXIMUM_CAPACITY && ft < (float)MAXIMUM_CAPACITY ? (int)ft : __INT_MAX__);
     }
     map->threshold = newThr;
-    node_t **newTab = calloc(newCap, sizeof(node_t *));
+    hashmap_node **newTab = calloc(newCap, sizeof(hashmap_node *));
     map->table = newTab;
     map->capacity = newCap;
     if (oldTab != NULL)
     {
         for (int j = 0; j < oldCap; j++)
         {
-            node_t *e;
+            hashmap_node *e;
             if ((e = oldTab[j]) != NULL)
             {
                 oldTab[j] = NULL;
@@ -172,9 +169,9 @@ node_t **hashmap_resize(hashmap_t *map)
                     newTab[e->hash & (newCap - 1)] = e;
                 else
                 { // preserve order
-                    node_t *loHead = NULL, *loTail = NULL;
-                    node_t *hiHead = NULL, *hiTail = NULL;
-                    node_t *next;
+                    hashmap_node *loHead = NULL, *loTail = NULL;
+                    hashmap_node *hiHead = NULL, *hiTail = NULL;
+                    hashmap_node *next;
                     do
                     {
                         next = e->next;
@@ -213,22 +210,22 @@ node_t **hashmap_resize(hashmap_t *map)
     return newTab;
 }
 
-entry_t **hashmap_entry_set(hashmap_t *map)
+entry **hashmap_entry_set(hashmap *map)
 {
-    entry_t **es;
+    entry **es;
     if ((es = map->entryset) == NULL)
     {
-        node_t **tab;
+        hashmap_node **tab;
         int n;
         if ((tab = map->table) != NULL && (n = map->size) > 0)
         {
-            es = malloc(n * sizeof(entry_t *));
+            es = malloc(n * sizeof(entry *));
             int j = 0;
             for (int i = 0; i < map->capacity; i++)
             {
-                for (node_t *e = tab[i]; e != NULL; e = e->next, j++)
+                for (hashmap_node *e = tab[i]; e != NULL; e = e->next, j++)
                 {
-                    es[j] = malloc(sizeof(entry_t));
+                    es[j] = malloc(sizeof(entry));
                     es[j]->key = e->key;
                     es[j]->value = e->value;
                 }
@@ -239,12 +236,12 @@ entry_t **hashmap_entry_set(hashmap_t *map)
     return es;
 }
 
-char **hashmap_key_set(hashmap_t *map)
+char **hashmap_key_set(hashmap *map)
 {
     char **ks;
     if ((ks = map->keyset) != NULL)
     {
-        entry_t **es;
+        entry **es;
         if ((es = hashmap_entry_set(map)) != NULL)
         {
             char **ks = malloc(map->size * sizeof(char *));
@@ -256,9 +253,9 @@ char **hashmap_key_set(hashmap_t *map)
     return ks;
 }
 
-char **hashmap_values(hashmap_t *map)
+char **hashmap_values(hashmap *map)
 {
-    entry_t **es;
+    entry **es;
     if ((es = hashmap_entry_set(map)) != NULL)
     {
         char **vals = malloc(map->size * sizeof(char *));
@@ -270,11 +267,11 @@ char **hashmap_values(hashmap_t *map)
     return NULL;
 }
 
-char *hashmap_put_val(hashmap_t *map, int hash, char *key, char *value, int onlyIfAbsent, int evict)
+char *hashmap_put_val(hashmap *map, int hash, char *key, char *value, int onlyIfAbsent, int evict)
 {
-    node_t **tab;
+    hashmap_node **tab;
     int cap = 0;
-    node_t *p;
+    hashmap_node *p;
     int n, i;
     if ((tab = map->table) == NULL || (n = map->capacity) == 0)
     {
@@ -283,14 +280,14 @@ char *hashmap_put_val(hashmap_t *map, int hash, char *key, char *value, int only
     }
     if ((p = tab[i = (n - 1) & hash]) == NULL)
     {
-        tab[i] = malloc(sizeof(node_t));
+        tab[i] = malloc(sizeof(hashmap_node));
         node_init(hash, key, value, NULL, tab[i]);
     }
     else
     {
-        node_t *e;
+        hashmap_node *e;
         char *k;
-        if (p->hash == hash && ((k = p->key) == key || (key != NULL && strcasecmp(key, k) == 0)))
+        if (p->hash == hash && ((k = p->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
             e = p;
         else
         {
@@ -298,11 +295,11 @@ char *hashmap_put_val(hashmap_t *map, int hash, char *key, char *value, int only
             {
                 if ((e = p->next) == NULL)
                 {
-                    p->next = malloc(sizeof(node_t));
+                    p->next = malloc(sizeof(hashmap_node));
                     node_init(hash, key, value, NULL, p->next);
                     break;
                 }
-                if (e->hash == hash && ((k = e->key) == key || (key != NULL && strcasecmp(key, k) == 0)))
+                if (e->hash == hash && ((k = e->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
                     break;
                 p = e;
             }
@@ -316,18 +313,18 @@ char *hashmap_put_val(hashmap_t *map, int hash, char *key, char *value, int only
         }
     }
     map->modcount++;
-    hashmap_destroy_cache(map);
+    hashmap_free_cache(map);
     if (map->size++ > map->threshold)
         hashmap_resize(map);
     return NULL;
 }
 
-char *hashmap_put(hashmap_t *map, char *key, char *value)
+char *hashmap_put(hashmap *map, char *key, char *value)
 {
-    return hashmap_put_val(map, hash(key), key, value, 0, 1);
+    return hashmap_put_val(map, hash(key, map->ignorecase), key, value, 0, 1);
 }
 
-void hashmap_put_map_entries(hashmap_t *map, hashmap_t *m, int evict)
+void hashmap_put_map_entries(hashmap *map, hashmap *m, int evict)
 {
     int s = m->size;
     if (s > 0)
@@ -347,35 +344,35 @@ void hashmap_put_map_entries(hashmap_t *map, hashmap_t *m, int evict)
             while (s > map->threshold && map->capacity < MAXIMUM_CAPACITY)
                 hashmap_resize(map);
         }
-        entry_t **es = hashmap_entry_set(m);
+        entry **es = hashmap_entry_set(m);
         for (int i = 0; i < m->size; i++)
         {
-            entry_t *e = es[i];
-            hashmap_put_val(map, hash(e->key), e->key, e->value, 0, evict);
+            entry *e = es[i];
+            hashmap_put_val(map, hash(e->key, map->ignorecase), e->key, e->value, 0, evict);
         }
     }
 }
 
-void hashmap_put_all(hashmap_t *map, hashmap_t *m)
+void hashmap_put_all(hashmap *map, hashmap *m)
 {
     hashmap_put_map_entries(map, m, 1);
 }
 
-node_t *hashmap_get_node(hashmap_t *map, char *key)
+hashmap_node *hashmap_get_node(hashmap *map, char *key)
 {
-    node_t **tab;
-    node_t *first, *e;
+    hashmap_node **tab;
+    hashmap_node *first, *e;
     int n, h;
     char *k;
-    if ((tab = map->table) != NULL && (n = map->capacity) > 0 && (first = tab[(n - 1) & (h = hash(key))]) != NULL)
+    if ((tab = map->table) != NULL && (n = map->capacity) > 0 && (first = tab[(n - 1) & (h = hash(key, map->ignorecase))]) != NULL)
     {
-        if (first->hash == h && ((k = first->key) == key || (key != NULL && strcasecmp(key, k) == 0)))
+        if (first->hash == h && ((k = first->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
             return first;
         if ((e = first->next) != NULL)
         {
             do
             {
-                if (e->hash == h && ((k = e->key) == key || (key != NULL && strcasecmp(key, k) == 0)))
+                if (e->hash == h && ((k = e->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
                     return e;
             } while ((e = e->next) != NULL);
         }
@@ -383,29 +380,29 @@ node_t *hashmap_get_node(hashmap_t *map, char *key)
     return NULL;
 }
 
-char *hashmap_get(hashmap_t *map, char *key)
+char *hashmap_get(hashmap *map, char *key)
 {
-    node_t *e;
+    hashmap_node *e;
     return (e = hashmap_get_node(map, key)) == NULL ? NULL : e->value;
 }
 
-node_t *hashmap_remove_node(hashmap_t *map, int hash, char *key, char *value, int matchValue, int movable)
+hashmap_node *hashmap_remove_node(hashmap *map, int hash, char *key, char *value, int matchValue, int movable)
 {
-    node_t **tab;
-    node_t *p;
+    hashmap_node **tab;
+    hashmap_node *p;
     int n, index;
     if ((tab = map->table) != NULL && (n = map->capacity) > 0 && (p = tab[index = (n - 1) & hash]) != NULL)
     {
-        node_t *node = NULL, *e;
+        hashmap_node *node = NULL, *e;
         char *k;
         char *v;
-        if (p->hash == hash && ((k = p->key) == key || (key != NULL && strcasecmp(key, k) == 0)))
+        if (p->hash == hash && ((k = p->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
             node = p;
         else if ((e = p->next) != NULL)
         {
             do
             {
-                if (e->hash == hash && ((k = e->key) == key || (key != NULL && strcasecmp(key, k) == 0)))
+                if (e->hash == hash && ((k = e->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
                 {
                     node = e;
                     break;
@@ -424,7 +421,7 @@ node_t *hashmap_remove_node(hashmap_t *map, int hash, char *key, char *value, in
                 p->next = node->next;
             }
             map->modcount++;
-            hashmap_destroy_cache(map);
+            hashmap_free_cache(map);
             map->size--;
             return node;
         }
@@ -432,47 +429,47 @@ node_t *hashmap_remove_node(hashmap_t *map, int hash, char *key, char *value, in
     return NULL;
 }
 
-char *hashmap_remove(hashmap_t *map, char *key)
+char *hashmap_remove(hashmap *map, char *key)
 {
-    node_t *e;
-    if ((e = hashmap_remove_node(map, hash(key), key, NULL, 0, 1)) == NULL)
+    hashmap_node *e;
+    if ((e = hashmap_remove_node(map, hash(key, map->ignorecase), key, NULL, 0, 1)) == NULL)
         return NULL;
     char *value = e->value;
     free(e);
     return value;
 }
 
-int hashmap_contains_key(hashmap_t *map, char *key)
+int hashmap_contains_key(hashmap *map, char *key)
 {
     return hashmap_get_node(map, key) != NULL;
 }
 
-int hashmap_contains_value(hashmap_t *map, char *value)
+int hashmap_contains_value(hashmap *map, char *value)
 {
-    node_t **tab;
+    hashmap_node **tab;
     char *v;
     if ((tab = map->table) != NULL && map->size > 0)
         for (int i = 0; i < map->capacity; i++)
-            for (node_t *e = tab[i]; e != NULL; e = e->next)
+            for (hashmap_node *e = tab[i]; e != NULL; e = e->next)
                 if ((v = e->value) == value || (value != NULL && strcmp(value, v) == 0))
                     return 1;
     return 0;
 }
 
-char *hashmap_get_or_default(hashmap_t *map, char *key, char *defaultValue)
+char *hashmap_get_or_default(hashmap *map, char *key, char *defaultValue)
 {
-    node_t *e;
+    hashmap_node *e;
     return (e = hashmap_get_node(map, key)) == NULL ? defaultValue : e->value;
 }
 
-char *hashmap_put_if_absent(hashmap_t *map, char *key, char *value)
+char *hashmap_put_if_absent(hashmap *map, char *key, char *value)
 {
-    return hashmap_put_val(map, hash(key), key, value, 1, 1);
+    return hashmap_put_val(map, hash(key, map->ignorecase), key, value, 1, 1);
 }
 
-char *hashmap_replace(hashmap_t *map, char *key, char *value)
+char *hashmap_replace(hashmap *map, char *key, char *value)
 {
-    node_t *e;
+    hashmap_node *e;
     if ((e = hashmap_get_node(map, key)) != NULL)
     {
         char *oldValue = e->value;
