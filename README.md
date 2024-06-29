@@ -1,6 +1,6 @@
-# Simple HTTP Server
+# Simple HTTP Server (WIP)
 
-A simple example of an HTTP server written in c.
+A simple example of an linux HTTP server written in c.
 
 # Usage
 
@@ -17,4 +17,4 @@ lastly, execute the file
     ./server
 
 You should then be able to view the contents of `index.html` by visiting `http://localhost:8000/` in a browser.
-You can change the port entering the port as the first arg after `./server` or by going to `server.c` and changing `#define PORT 8000` on line 14 to `#define PORT {DESIRED_PORT}`
+You can change the port entering the port as the first arg after `./server` or by going to `server.c` and changing `#define PORT 8000` on line 7 to `#define PORT {DESIRED_PORT}`

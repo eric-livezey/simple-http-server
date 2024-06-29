@@ -1,91 +1,101 @@
-#include <stdio.h>
-#include <time.h>
 #include <unistd.h>
 #include "hashmap.h"
 
-typedef struct HTTP_request_s
+#define iswhitespace(c) (c == ' ' || c == '\t')
+#define istchar(c) (c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~' || isdigit(c) || isalpha(c))
+#define isobschar(c) (c >= 0x80 && c <= 0xFF)
+#define isvchar(c) (c >= 0x21 && c <= 0x7E)
+#define isunreserved(c) (isalpha(c) || isdigit(c) || c == '-' || c == '.' || c == '_' || c == '~')
+#define issubdelim(c) (c == '!' || c == '$' || c == '&' || c == '\'' || c == '(' || c == ')' || c == '*' || c == '+' || c == ',' || c == ';' || c == '=')
+#define isqpair(ptr) ((ptr)[0] == '\\' && (iswhitespace((ptr)[1]) || isvchar((ptr)[1]) || isobschar((ptr)[1])))
+#define iscrlf(ptr) ((ptr)[0] == '\r' && (ptr)[1] == '\n')
+#define ispctenc(ptr) ((ptr)[0] == '%' && isxdigit((ptr)[1]) && isxdigit((ptr)[2]))
+#define ispchar(ptr) (isunreserved(*(ptr)) || ispctenc(ptr) || issubdelim(*(ptr)) || *(ptr) == ':' || *(ptr) == '@')
+
+enum FLAGS
+{
+    CONNECTION_ERROR = 0b00000001,
+    PARSE_ERROR = 0b00000010,
+    BAD_CONTENT_LENGTH = 0b00000100,
+    CONTENT_TOO_LARGE = 0b00001000
+};
+
+struct part
+{
+    MAP *headers;
+    unsigned long content_length;
+    char *content;
+};
+
+struct multipart
+{
+    struct part *parts;
+    unsigned long length;
+    STACK *stack;
+};
+
+struct content_type
+{
+    char *type;
+    char *subtype;
+    MAP *parameters;
+};
+
+struct chunk
+{
+    unsigned long size;
+    char *content;
+    MAP *extension;
+};
+
+typedef struct HTTP_request
 {
     char *method;
     char *path;
-    hashmap *query;
+    MAP *query;
     char *protocol;
-    hashmap *headers;
-    char *body;
+    MAP *headers;
+    char *content;
     unsigned long content_length;
+    MAP *trailers;
+    STACK *stack;
+    short flags;
 } HTTP_request;
 
-typedef struct HTTP_response_s
+typedef struct HTTP_response
 {
     char *protocol;
     short code;
     char *reason;
-    hashmap *headers;
-    char *body;
+    MAP *headers;
+    char *content;
     unsigned long content_length;
+    MAP *trailers;
+    STACK *stack;
 } HTTP_response;
 
-void urldecode(char *dst, const char *src)
+/*
+ * -------- UTILS --------
+ */
+
+void HTTP_request_free(HTTP_request *req)
 {
-    char a, b;
-    while (*src)
-    {
-        if ((*src == '%') &&
-            ((a = src[1]) && (b = src[2])) &&
-            (isxdigit(a) && isxdigit(b)))
-        {
-            if (a >= 'a')
-                a -= 'a' - 'A';
-            if (a >= 'A')
-                a -= ('A' - 10);
-            else
-                a -= '0';
-            if (b >= 'a')
-                b -= 'a' - 'A';
-            if (b >= 'A')
-                b -= ('A' - 10);
-            else
-                b -= '0';
-            *dst++ = 16 * a + b;
-            src += 3;
-        }
-        else if (*src == '+')
-        {
-            *dst++ = ' ';
-            src++;
-        }
-        else
-        {
-            *dst++ = *src++;
-        }
-    }
-    *dst++ = '\0';
+    if (req->query != NULL)
+        MAP_free(req->query);
+    if (req->headers != NULL)
+        MAP_free(req->headers);
+    if (req->trailers != NULL)
+        MAP_free(req->trailers);
+    STACK_free(req->stack);
 }
 
-int HTTP_request_free(HTTP_request *request)
+void HTTP_response_free(HTTP_response *res)
 {
-    if (request->query != NULL)
-    {
-        hashmap_free_all(request->query);
-        free(request->query);
-    }
-    if (request->headers != NULL)
-    {
-        hashmap_free_all(request->headers);
-        free(request->headers);
-    }
-    return 0;
-}
-
-int HTTP_response_free(HTTP_response *response)
-{
-    if (response->headers != NULL)
-    {
-        hashmap_free_all(response->headers);
-        free(response->headers);
-    }
-    if (response->body != NULL)
-        free(response->body);
-    return 0;
+    if (res->headers != NULL)
+        MAP_free(res->headers);
+    if (res->trailers != NULL)
+        MAP_free(res->trailers);
+    STACK_free(res->stack);
 }
 
 char *HTTP_date_ex(struct tm *tm, char *result)
@@ -97,8 +107,7 @@ char *HTTP_date_ex(struct tm *tm, char *result)
 
 char *HTTP_date(struct tm *tm)
 {
-    char *result = malloc(29 * sizeof(char));
-    return HTTP_date_ex(tm, result);
+    return HTTP_date_ex(tm, malloc(29 * sizeof(char)));
 }
 
 char *HTTP_reason(unsigned short code)
@@ -198,66 +207,698 @@ char *HTTP_reason(unsigned short code)
     }
 }
 
-HTTP_request *HTTP_parserequest(char *data, HTTP_request *result)
+/*
+ * -------- PARSING --------
+ */
+
+char *qstring(char *ptr, char **endptr)
 {
-    result->query = NULL;
-    result->headers = NULL;
-    char *saveptr = NULL;
-    /* method */
-    if (*data == ' ' || (result->method = strtok_r(data, " ", &saveptr)) == NULL || *saveptr == ' ' || *saveptr == '\0')
+    long offset = 0;
+    if (*ptr != '"')
         return NULL;
-    /* target */
-    if ((result->path = strtok_r(NULL, " ", &saveptr)) == NULL || *saveptr == ' ' || *saveptr == '\0')
+    ptr++;
+    *endptr = ptr;
+    while (*(*endptr) != '"' && !iscrlf(*endptr))
+    {
+        if (isqpair(*endptr))
+        {
+            (*endptr)++;
+            offset--;
+        }
+        (*endptr)[offset] = *(*endptr);
+        (*endptr)++;
+    }
+    if (iscrlf(*endptr))
         return NULL;
-    urldecode(result->path, result->path);
-    char *ptr = saveptr + 1;
-    if (strstr(result->path, "?") != NULL)
-    { /* query exists */
-        saveptr = NULL;
-        result->path = strtok_r(result->path, "?", &saveptr);
-        result->query = malloc(sizeof(hashmap));
-        hashmap_init(result->query, 1);
-        char *key;
-        char *val;
-        while ((key = strtok_r(NULL, "=", &saveptr)) != NULL) {
-            if ((val = strtok_r(NULL, "&", &saveptr)) == NULL) {
-                HTTP_request_free(result);
+    (*endptr)[offset] = '\0';
+    (*endptr)++;
+    return ptr;
+}
+
+MAP *parse_parameters(char *ptr, MAP *result)
+{
+    char *endptr = ptr, *k, *v;
+    while (*ptr != '\0')
+    {
+        // OWS
+        while (iswhitespace(*ptr))
+            ptr++;
+        // ';'
+        if (*ptr != ';')
+            return NULL;
+        ptr++;
+        *endptr = '\0';
+        // OWS
+        while (iswhitespace(*ptr))
+            ptr++;
+        if (*ptr == '\0')
+            break;
+        // token
+        k = endptr = ptr;
+        while (istchar(*endptr))
+            endptr++;
+        if (endptr == ptr)
+            return NULL;
+        ptr = endptr;
+        // '='
+        if (*ptr != '=')
+            return NULL;
+        ptr++;
+        *endptr = '\0';
+        // token / quoted-string
+        if (*ptr == '"')
+        {
+            // quoted-string
+            if ((v = qstring(ptr, &endptr)) == NULL)
                 return NULL;
+        }
+        else
+        {
+            // token
+            v = endptr = ptr;
+            while (istchar(*endptr))
+                endptr++;
+            if (endptr == ptr)
+                return NULL;
+        }
+        ptr = endptr;
+        MAP_put(result, k, v);
+    }
+    if (*endptr != '\0')
+        return NULL;
+    return result;
+}
+
+unsigned long *parse_range(char *ptr, unsigned long size, unsigned long *result)
+{
+    char firstpos = 1, *endptr;
+    // "bytes" (only byte ranges are acceptable)
+    if (strncmp(ptr, "bytes", 5) != 0)
+        return NULL;
+    ptr += 5;
+    // '='
+    if (*ptr != '=')
+        return NULL;
+    ptr++;
+    // first-pos
+    endptr = ptr;
+    if (isdigit(*ptr))
+        result[0] = strtoul(ptr, &endptr, 10);
+    else
+        result[0] = 0;
+    if (*endptr != '-')
+        return NULL;
+    if (ptr == endptr)
+        firstpos = 0; // false
+    ptr = endptr;
+    ptr++;
+    // last-pos
+    endptr = ptr;
+    if (isdigit(*ptr))
+        result[1] = strtoul(ptr, &endptr, 10);
+    else
+        result[1] = size - 1;
+    if (*endptr != '\0' || !firstpos && ptr == endptr)
+        return NULL;
+    return result;
+}
+
+struct content_type *parse_content_type(char *ptr, struct content_type *result)
+{
+    char *endptr;
+    // token
+    result->type = endptr = ptr;
+    while (istchar(*endptr))
+        endptr++;
+    if (endptr == ptr)
+        return NULL;
+    ptr = endptr;
+    // '/'
+    if (*ptr != '/')
+        return NULL;
+    ptr++;
+    *endptr = '\0';
+    // token
+    result->subtype = endptr = ptr;
+    while (istchar(*endptr))
+        endptr++;
+    if (endptr == ptr)
+        return NULL;
+    ptr = endptr;
+    // parameters
+    if (parse_parameters(ptr, result->parameters) == NULL)
+        return NULL;
+    *endptr = '\0';
+    return result;
+}
+
+MAP *parse_query(char *ptr, MAP *result)
+{
+    char *endptr = ptr, *k, *v;
+    // '?'
+    if (*ptr != '?')
+        return NULL;
+    ptr++;
+    while (1)
+    {
+        *endptr = '\0';
+        // pchar
+        k = endptr = ptr;
+        while (*endptr != '=' && ispchar(endptr))
+            endptr++;
+        ptr = endptr;
+        // '='
+        if (*ptr != '=')
+            return NULL;
+        ptr++;
+        *endptr = '\0';
+        // pchar
+        v = endptr = ptr;
+        while (*endptr != '&' && ispchar(endptr))
+            endptr++;
+        ptr = endptr;
+        MAP_put(result, k, v);
+        // [ '&' ]
+        if (*ptr != '&')
+            break;
+        ptr++;
+    }
+    // '\0'
+    if (*ptr != '\0')
+        return NULL;
+    *endptr = '\0';
+    for (int i = 0; i < MAP_size(result); i++)
+    {
+        urldecode(MAP_entry_set(result)[i]->key, MAP_entry_set(result)[i]->key);
+        urldecode(MAP_entry_set(result)[i]->value, MAP_entry_set(result)[i]->value);
+    }
+    return result;
+}
+
+struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result)
+{
+    char *endptr;
+    // token
+    result->method = endptr = ptr;
+    while (istchar(*endptr))
+        endptr++;
+    if (endptr == ptr)
+        return NULL;
+    ptr = endptr;
+    // SP
+    if (*ptr != ' ')
+        return NULL;
+    ptr++;
+    *endptr = '\0';
+    // request-target
+    // TODO: better validation
+    result->path = endptr = ptr;
+    while (*endptr != ' ' && !iscrlf(endptr))
+        endptr++;
+    ptr = endptr;
+    // SP
+    if (*ptr != ' ')
+        return NULL;
+    ptr++;
+    *endptr = '\0';
+    // "HTTP"
+    result->protocol = endptr = ptr;
+    if (strncmp(endptr, "HTTP", 4) != 0)
+        return NULL;
+    endptr += 4;
+    // '/'
+    if (*endptr != '/')
+        return NULL;
+    endptr++;
+    // DIGIT
+    if (!isdigit(*endptr))
+        return NULL;
+    endptr++;
+    // '.'
+    if (*endptr != '.')
+        return NULL;
+    endptr++;
+    // DIGIT
+    if (!isdigit(*endptr))
+        return NULL;
+    endptr++;
+    // CRLF
+    if (!iscrlf(endptr))
+        return NULL;
+    *endptr = '\0';
+    ptr = result->path;
+    while (*ptr != '\0')
+        if (*ptr == '?' && parse_query(ptr, result->query) != NULL)
+            break;
+        else
+            ptr++;
+    urldecode(result->path, result->path);
+    return result;
+}
+
+struct HTTP_response *HTTP_parse_statusln(char *ptr, struct HTTP_response *result)
+{
+    char *temp, *endptr;
+    // "HTTP"
+    result->protocol = endptr = ptr;
+    if (strncmp(endptr, "HTTP", 4) == 0)
+        endptr += 4;
+    else
+        return NULL;
+    // '/'
+    if (*endptr == '/')
+        endptr++;
+    else
+        return NULL;
+    // DIGIT
+    if (isdigit(*endptr))
+        endptr++;
+    else
+        return NULL;
+    // '.'
+    if (*endptr == '.')
+        endptr++;
+    else
+        return NULL;
+    // DIGIT
+    if (isdigit(*endptr))
+        endptr++;
+    else
+        return NULL;
+    ptr = endptr;
+    // SP
+    if (*ptr == ' ')
+        ptr++;
+    else
+        return NULL;
+    *endptr = '\0';
+    // DIGIT
+    temp = endptr = ptr;
+    if (isdigit(*endptr))
+        endptr++;
+    else
+        return NULL;
+    // DIGIT
+    if (isdigit(*endptr))
+        endptr++;
+    else
+        return NULL;
+    // DIGIT
+    if (isdigit(*endptr))
+        endptr++;
+    else
+        return NULL;
+    ptr = endptr;
+    // SP
+    if (*ptr == ' ')
+        ptr++;
+    else
+        return NULL;
+    *endptr = '\0';
+    result->code = strtous(temp, &endptr, 10);
+    // token
+    result->reason = endptr = ptr;
+    while (istchar(*endptr))
+        endptr++;
+    if (endptr == ptr)
+        return NULL;
+    // CRLF
+    if (iscrlf(endptr))
+        *endptr = '\0';
+    else
+        return NULL;
+    return result;
+}
+
+struct entry *HTTP_parse_fieldln(char *ptr, struct entry *result)
+{
+    char *endptr;
+    // token
+    result->key = endptr = ptr;
+    while (istchar(*endptr))
+        endptr++;
+    if (endptr == ptr)
+        return NULL;
+    ptr = endptr;
+    // ':'
+    if (*ptr == ':')
+        ptr++;
+    else
+        return NULL;
+    *endptr = '\0';
+    // OWS
+    while (iswhitespace(*ptr))
+        ptr++;
+    if (iscrlf(ptr))
+    {
+        result->value = NULL;
+        return 0;
+    }
+    // VCHAR / obs-text
+    result->value = endptr = ptr;
+    if (isvchar(*endptr) || isobschar(*endptr))
+        endptr++;
+    else
+        return NULL;
+    // [ 1*( SP / HTAB / field-vchar ) field-vchar ] OWS
+    while (iswhitespace(*endptr) || isvchar(*endptr) || isobschar(*endptr))
+        endptr++;
+    ptr = endptr;
+    endptr--;
+    while (iswhitespace(*endptr))
+        endptr--;
+    endptr++;
+    if (iscrlf(ptr))
+        *endptr = '\0';
+    else
+        return NULL;
+    return result;
+}
+
+struct chunk *HTTP_parse_chunk_size(char *ptr, struct chunk *result)
+{
+    char *endptr, *k, *v;
+    // chunk-size
+    result->size = strtoul(ptr, &endptr, 16);
+    if (endptr == ptr)
+        return NULL;
+    ptr = endptr;
+    // chunk-extension
+    while (!iscrlf(ptr))
+    {
+        // BWS
+        while (iswhitespace(*ptr))
+            ptr++;
+        // ';'
+        if (*ptr == ';')
+            ptr++;
+        else
+            return NULL;
+        *endptr = '\0';
+        // BWS
+        while (iswhitespace(*ptr))
+            ptr++;
+        // token
+        k = endptr = ptr;
+        while (istchar(*endptr))
+            endptr++;
+        if (endptr == ptr)
+            return NULL;
+        ptr = endptr;
+        if (*ptr == ';' || iscrlf(ptr))
+        {
+            MAP_put(result->extension, k, NULL);
+            continue;
+        }
+        // BWS
+        while (iswhitespace(*ptr))
+            ptr++;
+        // '='
+        if (*ptr == '=')
+            ptr++;
+        else
+            return NULL;
+        *endptr = '\0';
+        // BWS
+        while (iswhitespace(*ptr))
+            ptr++;
+        // token / quoted-string
+        if (*ptr == '"')
+        {
+            // quoted-string
+            if ((v = qstring(ptr, &endptr)) == NULL)
+                return NULL;
+        }
+        else
+        {
+            // token
+            v = endptr = ptr;
+            while (istchar(*endptr))
+                endptr++;
+            if (endptr == ptr)
+                return NULL;
+        }
+        ptr = endptr;
+        MAP_put(result->extension, k, v);
+    }
+    if (iscrlf(ptr))
+        *endptr = '\0';
+    else
+        return NULL;
+    return result;
+}
+
+struct multipart *parse_multipart(char *content, unsigned long content_length, char *boundary, struct multipart *result)
+{
+    struct entry e;
+    struct part part, *temp;
+    char *ptr = content, *endptr, *k;
+    int blen = strlen(boundary);
+    unsigned long len = content_length;
+    result->parts = NULL;
+    result->length = 0;
+    // --boundary
+    while (len > blen + 2)
+    {
+        if (strncmp("--", ptr, 2) == 0 && strncmp(boundary, ptr + 2, blen) == 0)
+            break;
+        ptr++;
+        len--;
+    }
+    ptr += blen + 2;
+    len -= blen + 2;
+    if (len < 0)
+        return NULL;
+    while (len > 4 || strncmp("--\r\n", ptr, 4) != 0)
+    {
+        part.headers = MAP_new(1);
+        // CRLF
+        if (len >= 2 && iscrlf(ptr))
+        {
+            ptr += 2;
+            len -= 2;
+        }
+        else
+            return NULL;
+        // headers
+        while (!iscrlf(ptr))
+        {
+            // valid line
+            endptr = ptr;
+            while (len >= 2 && !iscrlf(endptr))
+            {
+                endptr++;
+                len--;
             }
-            hashmap_put(result->query, key, val);
+            endptr += 2;
+            len -= 2;
+            if (len < 0)
+                return NULL;
+            // field line
+            if (HTTP_parse_fieldln(ptr, &e) == NULL)
+                return NULL;
+            if ((k = MAP_get(part.headers, e.key)) != NULL && e.value != NULL)
+            {
+                k = buffcat(k, strlen(k), ", ", 3);
+                e.key = buffcat(k, strlen(k), e.key, strlen(e.key) + 1);
+                free(k);
+                STACK_push(result->stack, e.key);
+            }
+            MAP_put(part.headers, e.key, e.value);
+            ptr = endptr;
+        }
+        // CRLF
+        ptr += 2;
+        len -= 2;
+        if (len < 0)
+            return NULL;
+        part.content = ptr;
+        part.content_length = 0;
+        // --boundary CRLF
+        while (len > blen + 4)
+        {
+            if (strncmp("\r\n--", ptr, 4) == 0 && strncmp(boundary, ptr + 4, blen) == 0)
+                break;
+            ptr++;
+            len--;
+            part.content_length++;
+        }
+        // append the new part
+        result->length++;
+        temp = result->parts;
+        result->parts = malloc(sizeof(struct part) * result->length);
+        if (temp != NULL)
+        {
+            memcpy(result->parts, temp, sizeof(struct part) * result->length - 1);
+            free(temp);
+        }
+        result->parts[result->length - 1] = part;
+        // next --boundary
+        while (len > blen + 2)
+        {
+            if (strncmp("\r\n--", ptr, 4) == 0 && strncmp(boundary, ptr + 4, blen) == 0)
+                break;
+            ptr++;
+            len--;
+        }
+        ptr += blen + 4;
+        len -= blen + 4;
+        if (len < 0)
+            return NULL;
+    }
+    STACK_push(result->stack, result->parts);
+    if (len < 4)
+        return NULL;
+    return result;
+}
+
+long recv_line(int fd, char **ptr)
+{
+    char c, ret, buffer[1024], *temp, *data = *ptr = NULL;
+    short i = 0;
+    long size = 0;
+    while (!(c == '\n' && (i > 1 && buffer[i - 2] == '\r' || data != NULL && i == 1 && data[size - 1] == '\r')))
+    {
+        /* read a character */
+        ret = recv(fd, &c, 1, 0);
+
+        /* error or EOF */
+        if (ret <= -1)
+        {
+            if (data != NULL)
+                free(data);
+            return -1;
+        }
+
+        /* append character to buffer or concat if buffer is full */
+        if (i == sizeof(buffer))
+        {
+            temp = data;
+            data = buffcat(data, size, buffer, sizeof(buffer));
+            if (temp != NULL)
+                free(temp);
+            size += sizeof(buffer);
+            if (size + sizeof(buffer) >= 4UL * (1 << 30)) // 4 GB limit
+                return -2;
+            i = 0;
+        }
+        else
+        {
+            buffer[i] = c;
+            i++;
         }
     }
-    /* protocol */
-    if ((result->protocol = strtok_r(ptr, "\r\n", &saveptr)) == NULL || saveptr[1] == '\0')
+    if (i > 0)
     {
-        HTTP_request_free(result);
+        temp = data;
+        data = buffcat(data, size, buffer, i);
+        if (temp != NULL)
+            free(temp);
+        size += i;
+    }
+    *ptr = data;
+    return size - 2;
+}
+
+struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
+{
+    char *data, *temp, *k;
+    unsigned short size = 65535;
+    long ret;
+    unsigned long bytes;
+    struct entry e;
+    struct chunk chunk;
+    ret = recv_line(fd, &data);
+    if (ret < 0)
+    {
+        if (ret == -1)
+            result->flags = CONNECTION_ERROR;
+        if (ret == -2)
+            result->flags = CONTENT_TOO_LARGE;
         return NULL;
     }
-    /* headers */
-    result->headers = malloc(sizeof(hashmap));
-    hashmap_init(result->headers, 1);
-    ptr += strlen(result->protocol) + 2;
-    while (strncmp(ptr, "\r\n", 2) != 0)
-    { /* fill headers with header data */
-        ptr = strstr(ptr, "\r\n") + 2;
-        char *k = strtok_r(NULL, ":", &saveptr) + 1;
-        char *v = strtok_r(NULL, "\r\n", &saveptr);
-        while (v[0] == ' ') /* ignore leading whitespace */
-            v++;
-        hashmap_put(result->headers, k, v);
-        if (strcasecmp(k, "Content-Length") == 0)
-            result->content_length = strtoul(v, NULL, 10);
-    }
-    /* body */
-    if (hashmap_get(result->headers, "Content-Length") != NULL)
+    STACK_push(result->stack, data);
+    chunk.extension = MAP_new(0);
+    if (HTTP_parse_chunk_size(data, &chunk) == NULL)
     {
-        result->body = ptr + 2;
-        result->body[result->content_length] = '\0';
+        MAP_free(chunk.extension);
+        result->flags = PARSE_ERROR;
+        return NULL;
     }
-    else
+    while (chunk.size > 0)
     {
-        result->body = NULL;
-        result->content_length = 0;
+        chunk.content = malloc(chunk.size);
+        bytes = 0;
+        while (bytes < chunk.size)
+        {
+            ret = recv(fd, chunk.content + bytes, bytes + size > chunk.size ? chunk.size - bytes : size, 0);
+            if (ret <= 0)
+            {
+                MAP_free(chunk.extension);
+                free(chunk.content);
+                result->flags = CONNECTION_ERROR;
+                return NULL;
+            }
+            bytes += ret;
+        }
+        ret = recv_line(fd, &data);
+        free(data);
+        if (ret != 0)
+        {
+            MAP_free(chunk.extension);
+            free(chunk.content);
+            if (ret == -1)
+                result->flags = CONNECTION_ERROR;
+            if (ret == -2)
+                result->flags = CONTENT_TOO_LARGE;
+            return NULL;
+        }
+        temp = result->content;
+        result->content = buffcat(result->content, result->content_length, chunk.content, chunk.size);
+        free(chunk.content);
+        if (temp != NULL)
+            free(temp);
+        result->content_length += chunk.size;
+        MAP_free(chunk.extension); // discard chunk extension
+        ret = recv_line(fd, &data);
+        if (ret < 0)
+        {
+            if (ret == -1)
+                result->flags = CONNECTION_ERROR;
+            if (ret == -2)
+                result->flags = CONTENT_TOO_LARGE;
+            return NULL;
+        }
+        STACK_push(result->stack, data);
+        chunk.extension = MAP_new(0);
+        if (HTTP_parse_chunk_size(data, &chunk) == NULL)
+        {
+            MAP_free(chunk.extension);
+            result->flags = PARSE_ERROR;
+            return NULL;
+        }
+    }
+    STACK_push(result->stack, result->content);
+    while (1)
+    {
+        size = recv_line(fd, &data);
+        STACK_push(result->stack, data);
+        if (size == 0)
+            break;
+        /* field-lines */
+        if (HTTP_parse_fieldln(data, &e) == NULL)
+        {
+            result->flags = PARSE_ERROR;
+            return NULL;
+        }
+        if ((k = MAP_get(result->trailers, e.key)) != NULL && e.value != NULL)
+        {
+            k = buffcat(k, strlen(k), ", ", 3);
+            e.key = buffcat(k, strlen(k), e.key, strlen(e.key) + 1);
+            free(k);
+            STACK_push(result->stack, e.key);
+        }
+        MAP_put(result->trailers, e.key, e.value);
     }
     return result;
 }
@@ -271,8 +912,9 @@ long HTTP_reqsize(HTTP_request *req)
     len += strlen(req->path);
     if (req->query != NULL)
     {
-        entry **es = hashmap_entry_set(req->query);
-        for (i = 0; i < req->query->size; i++)
+        struct entry **es = MAP_entry_set(req->query);
+        int size = MAP_size(req->query);
+        for (i = 0; i < size; i++)
         {
             len += 2;
             len += strlen(es[i]->key);
@@ -282,52 +924,55 @@ long HTTP_reqsize(HTTP_request *req)
     len += strlen(req->protocol);
     if (req->headers != NULL)
     {
-        entry **es = hashmap_entry_set(req->headers);
-        for (i = 0; i < req->headers->size; i++)
+        struct entry **es = MAP_entry_set(req->headers);
+        int size = MAP_size(req->headers);
+        for (i = 0; i < size; i++)
         {
             len += 4;
             len += strlen(es[i]->key);
             len += strlen(es[i]->value);
         }
     }
-    if (req->body != NULL)
+    if (req->content != NULL)
         len += req->content_length;
     return len;
 }
 
-char *HTTP_reqmsg(HTTP_request *req, char *result)
+char *HTTP_reqmsg(HTTP_request *req, char *buffer)
 {
     int i;
     long len = 0;
     /* write message */
-    result[0] = '\0';
-    len += sprintf(result, "%s %s", req->method, req->path);
+    buffer[0] = '\0';
+    len += sprintf(buffer, "%s %s", req->method, req->path);
     if (req->query != NULL)
     {
-        entry **es = hashmap_entry_set(req->query);
-        for (i = 0; i < req->query->size; i++)
+        struct entry **es = MAP_entry_set(req->query);
+        int size = MAP_size(req->query);
+        for (i = 0; i < size; i++)
         {
             len += 1;
             if (i == 0)
-                strcat(result + len, "?");
+                strcat(buffer + len, "?");
             else
-                strcat(result + len, "&");
-            len += sprintf(result + len, "%s=%s", es[i]->key, es[i]->value);
+                strcat(buffer + len, "&");
+            len += sprintf(buffer + len, "%s=%s", es[i]->key, es[i]->value);
         }
     }
-    len += sprintf(result + len, " %s\r\n", req->protocol);
+    len += sprintf(buffer + len, " %s\r\n", req->protocol);
     if (req->headers != NULL)
     {
-        entry **es = hashmap_entry_set(req->headers);
-        for (i = 0; i < req->headers->size; i++) /* headers */
-            len += sprintf(result + len, "%s: %s\r\n", es[i]->key, es[i]->value);
+        struct entry **es = MAP_entry_set(req->headers);
+        int size = MAP_size(req->headers);
+        for (i = 0; i < size; i++) /* headers */
+            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, es[i]->value);
     }
-    strcat(result + len, "\r\n");
+    strcat(buffer + len, "\r\n");
 
     len += 2;
-    if (req->body != NULL) /* body */
-        memcpy(result + len, req->body, req->content_length);
-    return result;
+    if (req->content != NULL) /* body */
+        memcpy(buffer + len, req->content, req->content_length);
+    return buffer;
 }
 
 unsigned long HTTP_ressize(HTTP_response *res)
@@ -337,18 +982,18 @@ unsigned long HTTP_ressize(HTTP_response *res)
     unsigned long len = 9;
     len += strlen(res->protocol);
     len += strlen(res->reason);
-    entry **es;
     if (res->headers != NULL)
     {
-        es = hashmap_entry_set(res->headers);
-        for (i = 0; i < res->headers->size; i++)
+        struct entry **es = MAP_entry_set(res->headers);
+        int size = MAP_size(res->headers);
+        for (i = 0; i < size; i++)
         {
             len += 4;
             len += strlen(es[i]->key);
             len += strlen(es[i]->value);
         }
     }
-    if (res->body != NULL)
+    if (res->content != NULL)
         len += res->content_length;
     return len;
 }
@@ -361,8 +1006,9 @@ char *HTTP_resmsg(HTTP_response *res, char *result)
     len += sprintf(result, "%s %d %s\r\n", res->protocol, res->code, res->reason); /* protocol code reason */
     if (res->headers != NULL)
     {
-        entry **es = hashmap_entry_set(res->headers);
-        for (int i = 0; i < res->headers->size; i++) /* headers */
+        struct entry **es = MAP_entry_set(res->headers);
+        int size = MAP_size(res->headers);
+        for (int i = 0; i < size; i++) /* headers */
             len += sprintf(result + len, "%s: %s\r\n", es[i]->key, es[i]->value);
     }
     strcat(result + len, "\r\n");
@@ -370,41 +1016,41 @@ char *HTTP_resmsg(HTTP_response *res, char *result)
     printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", result); /* print response (excluding body) */
 
     len += 2;
-    if (res->body != NULL) /* body */
-        memcpy(result + len, res->body, res->content_length);
+    if (res->content != NULL) /* body */
+        memcpy(result + len, res->content, res->content_length);
     return result;
 }
 
-long HTTP_send_response(HTTP_response *res, int connfd)
+long HTTP_send_response(HTTP_response *res, int fd)
 {
-    hashmap headers;
-    memset(&headers, 0, sizeof(hashmap));
-    hashmap_init(&headers, 1);
+    MAP *headers = MAP_new(1);
     if (res->headers != NULL)
-        hashmap_put_all(&headers, res->headers);
-    hashmap_put_if_absent(&headers, "Connection", "close");
+        MAP_put_all(headers, res->headers);
+    MAP_put_if_absent(headers, "Connection", "close");
     char date[29];
-    if (!hashmap_contains_key(&headers, "Date"))
+    if (!MAP_contains_key(headers, "Date"))
     { /* date */
         time_t timer;
         time(&timer);
         struct tm t;
         gmtime_r(&timer, &t);
         HTTP_date_ex(&t, date);
-        hashmap_put(&headers, "Date", date);
+        MAP_put(headers, "Date", date);
     }
     char content_length[numlenul(res->content_length)];
-    if (res->body != NULL && !hashmap_contains_key(&headers, "Content-Length"))
+    if (res->content != NULL && !MAP_contains_key(headers, "Content-Length"))
     { /* content-length */
         content_length[0] = '\0';
         sprintf(content_length, "%lu", res->content_length);
-        hashmap_put(&headers, "Content-Length", content_length);
+        MAP_put(headers, "Content-Length", content_length);
     }
-    hashmap *temp = res->headers;
-    res->headers = &headers;
+    MAP *temp = res->headers;
+    res->headers = headers;
     long len = HTTP_ressize(res);
     char msg[len];
     HTTP_resmsg(res, msg);
     res->headers = temp;
-    return write(connfd, msg, len);
+    unsigned long written = send(fd, msg, len, MSG_NOSIGNAL);
+    MAP_free(headers);
+    return written;
 }

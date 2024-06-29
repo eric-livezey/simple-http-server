@@ -1,173 +1,497 @@
-#include <math.h>
 #include <netdb.h>
-#include <netinet/in.h>
 #include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
+#include <fcntl.h>
 #include "http.h"
-#define MAX 1 << 16
 #define PORT 8000
 
-unsigned long *HTTP_parserange(char *range, unsigned long size)
+void HTTP_print_request(HTTP_request *req)
 {
-    char *temp;
-    unsigned long *ret;
-    if (strncmp(range, "bytes=", 6) != 0) /* must begin with "bytes=" */
-        return NULL;
-    range += 6;
-    temp = strstr(range, "-");               /* first and last pos should be separated by '-' */
-    ret = malloc(2 * sizeof(unsigned long)); /* 2 longs for first and last pos */
-    if (temp == NULL)                        /* there must be a separator */
-        return NULL;
-    if (temp - range == 0) /* the '-' is at the beginning meaning first pos is 0 */
-        ret[0] = 0;
-    else
-    { /* first position is specified */
-        char *endptr;
-        ret[0] = strtoul(range, &endptr, 10);
-        if (*range == '\0' || *endptr != '-') /* first position is not an integer */
-            return NULL;
+    printf("%s %s", req->method, req->path);
+    struct entry **es = MAP_entry_set(req->query);
+    int size = MAP_size(req->query);
+    int i;
+    for (i = 0; i < size; i++)
+    {
+        if (i == 0)
+            printf("?");
+        printf("%s=%s", es[i]->key, es[i]->value);
+        if (i < size - 1)
+            printf("&");
     }
-    range = temp + 1;
-    if (range[0] == '\0') /* the '-' is at the end meaning last pos is SIZE */
-        ret[1] = size;
-    else
-    { /* last position is specified */
-        char *endptr;
-        ret[1] = strtoul(range, &endptr, 10);
-        if (*range == '\0' || *endptr != '\0') /* last position is not an integer */
-            return NULL;
+    printf(" %s\r\n", req->protocol);
+
+    es = MAP_entry_set(req->headers);
+    size = MAP_size(req->headers);
+    for (i = 0; i < size; i++)
+    {
+        printf("%s: %s\r\n", es[i]->key, es[i]->value);
     }
-    return ret;
+    printf("\r\n");
 }
 
-void HTTP_filerequest(HTTP_response *response, char *path, char *content_type, hashmap *headers)
+char *strnstr(char *haystack, char *needle, int len)
 {
-    response->protocol = "HTTP/1.1";
-    if (response->headers == NULL)
+    int needle_len = strlen(needle);
+    int max = len - needle_len + 1;
+    for (int i = 0; i < max; i++)
+        if (strncmp(&haystack[i], needle, needle_len) == 0)
+            return &haystack[i];
+    return NULL;
+}
+
+char *strntok(char *str, char *tok, unsigned long n, char **saveptr, unsigned long *saven)
+{
+    if (str == NULL)
     {
-        response->headers = malloc(sizeof(hashmap));
-        hashmap_init(response->headers, 1);
+        str = *saveptr;
+        n = *saven;
     }
-    hashmap_put(response->headers, "Accept-Ranges", "bytes");
-    hashmap_put_if_absent(response->headers, "Cache-Control", "no-cache");
-    hashmap_put(response->headers, "Content-Type", content_type);
-    FILE *f = fopen(path, "r");
-    fseek(f, 0L, SEEK_END);
-    unsigned long size = ftell(f); /* file size */
-    rewind(f);
-    char *rangeh = hashmap_get(headers, "Range");
+    unsigned long len = strlen(tok), max = n - len + 1;
+    for (unsigned long i = 0; i < max; i++)
+    {
+        if (strncmp(str + i, tok, len) == 0)
+        {
+            str[i] = '\0';
+            *saveptr = str + i + len;
+            *saven = n - i - 1;
+            return str;
+        }
+    }
+    return NULL;
+}
+
+struct HTTP_response *HTTP_handle_head_file()
+{
+}
+
+struct HTTP_response *HTTP_handle_file(struct HTTP_request *req, char *path, char *content_type, struct HTTP_response *res)
+{
+    if (strcmp(req->path, "GET") == 0)
+    {
+    }
+    else if (strcmp(req->path, "HEAD") == 0)
+    {
+    }
+    else if (strcmp(req->path, "PUT") == 0)
+    {
+    }
+    else if (strcmp(req->path, "DELETE") == 0)
+    {
+    }
+    else
+    {
+        res->code = 405;
+    }
+}
+
+char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_response res, int fd)
+{
+    MAP_put(res.headers, "Accept-Ranges", "bytes");
+    MAP_put_if_absent(res.headers, "Cache-Control", "no-cache");
+    MAP_put(res.headers, "Content-Type", content_type);
+    FILE *fp = fopen(path, "r");
+    fseek(fp, 0L, SEEK_END);
+    unsigned long size = ftell(fp); /* file size */
+    char *rangeh = MAP_get(req->headers, "Range");
     if (rangeh != NULL)
     { /* range was specified */
-        char *v;
-        unsigned long *range = HTTP_parserange(rangeh, size);
+        unsigned long range[2];
+        parse_range(rangeh, size, range);
         if (range == NULL || range[0] < 0 || range[0] >= size || range[1] < range[0])
-        {                         /* invalid range */
-            response->code = 416; /* Range Not Satisfiable */
-            v = malloc((9 + numlenul(size)) * sizeof(char));
-            v[0] = '\0';
-            sprintf(v, "bytes */%ld", size);
+        {
+            res.code = 416; /* Range Not Satisfiable */
+            res.reason = HTTP_reason(res.code);
+            char content_range[9 + numlenul(size)];
+            content_range[0] = '\0';
+            sprintf(content_range, "bytes */%ld", size);
+            MAP_put(res.headers, "Content-Range", content_range);
+            HTTP_send_response(&res, fd);
         }
         else
         {
             if (range[1] > size - 1) /* last pos is capped at size - 1 */
                 range[1] = size - 1;
-            response->code = 206; /* Partial Content */
-            v = malloc((9 + numlenul(range[0]) + numlenul(range[1]) + numlenul(size)) * sizeof(char));
-            v[0] = '\0';
-            sprintf(v, "bytes %ld-%ld/%ld", range[0], range[1], size);
-            response->body = malloc(range[1] - range[0] + 1 * sizeof(char));
-            fseek(f, range[0], SEEK_CUR);
-            fread(response->body, range[1] - range[0] + 1, sizeof(char), f);
-            response->content_length = range[1] - range[0] + 1;
+            res.code = 206; /* Partial Content */
+            res.reason = HTTP_reason(res.code);
+            /* content-range */
+            char content_range[9 + numlenul(range[0]) + numlenul(range[1]) + numlenul(size)];
+            content_range[0] = '\0';
+            sprintf(content_range, "bytes %ld-%ld/%ld", range[0], range[1], size);
+            MAP_put(res.headers, "Content-Range", content_range);
+            /* size */
+            size = range[1] - range[0] + 1;
+            /* content-length */
+            char content_length[numlenul(size)];
+            content_length[0] = '\0';
+            sprintf(content_length, "%lu", size);
+            MAP_put(res.headers, "Content-Length", content_length);
+            HTTP_send_response(&res, fd);
+            /* body */
+            send_file(fd, fp, range[0], range[1]);
         }
-        if (range != NULL)
-            free(range);
-        hashmap_put(response->headers, "Content-Range", v);
-        fclose(f);
     }
     else
     {
-        response->code = 200; /* OK */
-        response->body = malloc(size * sizeof(char));
-        fread(response->body, size, sizeof(char), f);
-        response->content_length = size;
+
+        res.code = 200; /* OK */
+        res.reason = HTTP_reason(res.code);
+        /* content-length */
+        char content_length[numlenul(size)];
+        content_length[0] = '\0';
+        sprintf(content_length, "%lu", size);
+        MAP_put(res.headers, "Content-Length", content_length);
+        HTTP_send_response(&res, fd);
+        /* body */
+        send_file(fd, fp, 0, size - 1);
     }
-    response->reason = HTTP_reason(response->code);
+    fclose(fp);
+    HTTP_request_free(req);
+    HTTP_response_free(&res);
 }
 
-void handle(int connfd)
+/**
+ * read an HTTP request from `fd` and place the parsed data in `result`. If the data read is invalid, will return `NULL` and set `result->flags` accordingly.
+ * @param fd a file descriptor
+ * @param result an HTTP request struct to put the parsed data
+ */
+HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
 {
-    char buff[MAX];
-    int n = recv(connfd, buff, sizeof(buff), 0);
-
-    printf("================ REQUEST  ================\r\n\r\n");
-    if (n < 0)
+    char *data = NULL, *temp, *k, *v;
+    long i = 0, saven, ret;
+    struct entry e;
+    result->method = NULL;
+    result->path = NULL;
+    result->query = MAP_new(1);
+    result->protocol = NULL;
+    result->headers = MAP_new(1);
+    result->content = NULL;
+    result->content_length = 0;
+    result->trailers = MAP_new(1);
+    result->stack = STACK_new();
+    result->flags = 0;
+    ret = recv_line(fd, &data);
+    if (ret < 0)
     {
-        printf("RECV ERROR\r\n\r\n");
-        return;
+        if (ret == -1)
+            result->flags |= CONNECTION_ERROR;
+        if (ret == -2)
+            result->flags |= CONTENT_TOO_LARGE;
+        return NULL;
     }
-    if (n == 0)
-        printf("EMPTY REQUEST\r\n\r\n");
-    else
-        write(STDOUT_FILENO, buff, n);
+    STACK_push(result->stack, data);
+    if (HTTP_parse_reqln(data, result) == NULL)
+    {
+        result->flags = PARSE_ERROR;
+        return NULL;
+    }
+    while (1)
+    {
+        ret = recv_line(fd, &data);
+        if (ret < 0)
+        {
+            if (ret == -1)
+                result->flags |= CONNECTION_ERROR;
+            if (ret == -2)
+                result->flags |= CONTENT_TOO_LARGE;
+            return NULL;
+        }
+        STACK_push(result->stack, data);
+        if (ret == 0)
+            break;
+        /* field-lines */
+        if (HTTP_parse_fieldln(data, &e) == NULL)
+        {
+            result->flags |= PARSE_ERROR;
+            return NULL;
+        }
+        if ((k = MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
+        {
+            k = buffcat(k, strlen(k), ", ", 3);
+            e.key = buffcat(k, strlen(k), e.key, strlen(e.key) + 1);
+            free(k);
+            STACK_push(result->stack, e.key);
+        }
+        MAP_put(result->headers, e.key, e.value);
+    }
+    /* message body */
+    if ((v = MAP_get(result->headers, "Transfer-Encoding")) != NULL && *v != '\0')
+    {
+        int len = 1;
+        char *ptr = v;
+        while (*ptr != '\0')
+        {
+            if (*ptr == ',')
+                len++;
+            ptr++;
+        }
+        char *encodings[len];
+        int i = 0;
+        encodings[0] = v;
+        ptr = v;
+        while (*ptr != '\0')
+        {
+            if (*ptr == ',')
+            {
+                *ptr = '\0';
+                i++;
+                encodings[i] = ptr + 1;
+            }
+            ptr++;
+        }
+        for (i = 0; i < len; i++)
+        {
+            if (strcasecmp(encodings[i], "chunked") == 0)
+            {
+                recv_chunks(fd, result);
+            }
+        }
+    }
+    else if (MAP_contains_key(result->headers, "Content-Length"))
+    {
+        char *ptr, *endptr;
+        unsigned long content_length = strtoul(ptr = MAP_get(result->headers, "Content-Length"), &endptr, 10);
+        if (*ptr == '\0' || *endptr != '\0')
+        {
+            result->flags |= BAD_CONTENT_LENGTH;
+            return NULL;
+        }
+        if (content_length > 8UL * (1 << 30)) // 8 GB limit
+        {
+            /*
+             * NOTE: if we don't read the request to completion, the client will likely not recieve the response
+             * but reading the whole request will take far too long with 8GB+ file sizes and thus waste resources
+             * so, even though the request may be valid, we reject it immediately and close the connection
+             */
+            result->flags |= CONTENT_TOO_LARGE;
+            return NULL;
+        }
+        result->content = malloc(content_length);
+        unsigned short size = 65535;
+        unsigned long bytes = 0;
+        while (bytes < content_length)
+        {
+            ret = recv(fd, result->content + bytes, bytes + size > content_length ? content_length - bytes : size, 0);
+            if (ret <= 0)
+            {
+                free(result->content);
+                result->flags |= CONNECTION_ERROR;
+                return NULL;
+            }
+            bytes += ret;
+        }
+        STACK_push(result->stack, result->content);
+        result->content_length = content_length;
+    }
+    return result;
+}
 
-    HTTP_response res;
-    memset(&res, 0, sizeof(HTTP_response));
-    res.protocol = "HTTP/1.1";
+void handleconn(int fd)
+{
+    char persist = 1, *v, *ptr;
+    unsigned long n;
     HTTP_request req;
-    /* PATHS */
-    if (HTTP_parserequest(buff, &req) == NULL)
-        res.code = 400; /* Bad Request */
-    else if (strcmp(req.path, "/") == 0)
-        if (strcmp(req.method, "GET") == 0)
-            HTTP_filerequest(&res, "./index.html", "text/html", req.headers);
-        else
-            res.code = 405; /* Method Not Allowed */
-    else
+    HTTP_response res;
+    struct content_type content_type;
+    struct multipart parts;
+    content_type.parameters = MAP_new(1);
+    while (persist)
     {
-        short size = strlen(req.path) + 1;
-        char path[size + 1];
-        path[0] = '.';
-        for (int i = 0; i < size + 1; i++)
-            path[i + 1] = req.path[i];
-        /* is it a valid file? */
-        if (access(path, R_OK) == 0 && strcmp(path + size - 2, ".c") != 0 && strcmp(path + size - 2, ".h") != 0 && strcmp(path + size - 3, ".md") != 0 && strcmp(path + 2, "server") != 0 && strcmp(path + 2, "Makefile") != 0 && path[2] != '.')
+        res.protocol = "HTTP/1.1";
+        res.code = 200;
+        res.reason = "OK";
+        res.headers = MAP_new(1);
+        res.content = NULL;
+        res.content_length = 0;
+        res.trailers = MAP_new(1);
+        res.stack = STACK_new();
+        if (HTTP_readreq_ex(fd, &req) == NULL)
         {
-            if (strcmp(req.method, "GET") == 0)
-                HTTP_filerequest(&res, path, "*", req.headers);
+            if (req.flags & (PARSE_ERROR | CONNECTION_ERROR | BAD_CONTENT_LENGTH) != 0)
+            {
+                res.code = 400; /* Bad Request */
+            }
+            else if (req.flags & CONTENT_TOO_LARGE)
+            {
+                res.code = 413; /* Content Too Large */
+            }
+            MAP_put(res.headers, "Connection", "close");
+            persist = 0;
+        }
+        else
+        {
+            printf("================ REQUEST  ================\r\n\r\n");
+            HTTP_print_request(&req);
+            v = MAP_get(req.headers, "Connection");
+            if (v != NULL && strcmp(v, "close") == 0 || strcmp(req.protocol, "HTTP/1.0") && (v == NULL || strcmp(v, "keep-alive") != 0))
+            {
+                MAP_put(res.headers, "Connection", "close");
+                persist = 0;
+            }
             else
-                res.code = 405; /* Method Not Allowed */
-        }
-        else
-        {
-            res.code = 404; /* Not Found */
-            res.body = calloc(1, sizeof(char));
-            res.content_length = 0;
-        }
-    }
-    res.reason = HTTP_reason(res.code);
-    HTTP_send_response(&res, connfd);
+            {
+                MAP_put(res.headers, "Connection", "keep-alive");
+                persist = 1;
+            }
+            if ((v = MAP_get(req.headers, "Content-Type")) != NULL)
+            {
+                if (req.content == NULL || parse_content_type(v, &content_type) == NULL)
+                {
+                    res.code = 400; /* Bad Request */
+                    res.reason = HTTP_reason(res.code);
+                    HTTP_send_response(&res, fd);
+                    HTTP_request_free(&req);
+                    HTTP_response_free(&res);
+                    MAP_clear(content_type.parameters);
+                    continue;
+                }
+                if (strcasecmp(content_type.type, "multipart") == 0)
+                {
+                    if ((v = MAP_get(content_type.parameters, "boundary")) == NULL)
+                    {
+                        res.code = 400; /* Bad Request */
+                        res.reason = HTTP_reason(res.code);
+                        HTTP_send_response(&res, fd);
+                        HTTP_request_free(&req);
+                        HTTP_response_free(&res);
+                        MAP_clear(content_type.parameters);
+                        continue;
+                    }
+                    parts.stack = STACK_new();
+                    parse_multipart(req.content, req.content_length, v, &parts);
+                    // Temporary implementation only takes the first part
+                    if (parts.length = 1)
+                    {
+                        req.content = parts.parts[0].content;
+                        req.content_length = parts.parts[0].content_length;
+                        MAP_put_all(req.headers, parts.parts[0].headers);
+                        MAP_free(parts.parts[0].headers);
+                        while (!STACK_empty(parts.stack))
+                            STACK_push(req.stack, STACK_pop(parts.stack));
+                        STACK_free(parts.stack);
+                    }
+                    else
+                    {
+                        for (int i = 0; i < parts.length; i++)
+                        {
+                            MAP_free(parts.parts[i].headers);
+                        }
+                        STACK_free(parts.stack);
+                    }
+                }
+                MAP_clear(content_type.parameters);
+            }
+            if (strcmp(req.method, "PUT") == 0 || strcmp(req.method, "DELETE") == 0 || strcmp(req.method, "CONNECT") == 0 || strcmp(req.method, "OPTIONS") == 0 || strcmp(req.method, "TRACE") == 0)
+            {
+                res.code = 501;
+            }
+            else if (strcmp(req.path, "/") == 0)
+            {
+                if (strcmp(req.method, "GET") == 0)
+                {
+                    res.code = 200; /* OK */
+                    HTTP_respond_file(&req, "./index.html", "text/html", res, fd);
+                    continue;
+                }
+                else
+                {
+                    res.code = 405; /* Method Not Allowed */
+                    res.content = malloc(0);
+                    res.content_length = 0;
+                    STACK_push(res.stack, res.content);
+                }
+            }
+            else if (strcmp(req.path, "/favicon.ico") == 0)
+            {
+                if (strcmp(req.method, "GET") == 0)
+                {
+                    MAP_put(res.headers, "Cache-Control", "max-age=6000");
+                    res.code = 200; /* OK */
+                    HTTP_respond_file(&req, "./favicon.svg", "image/svg+xml", res, fd);
+                    continue;
+                }
+                else
+                {
+                    res.code = 405; /* Method Not Allowed */
+                    res.content = malloc(0);
+                    res.content_length = 0;
+                    STACK_push(res.stack, res.content);
+                }
+            }
+            else if (strcmp(req.path, "/video.mp4") == 0)
+            {
+                if (strcmp(req.method, "GET") == 0)
+                {
+                    if (access("./video.mp4", F_OK) == 0)
+                    {
 
-    /* cleanup */
-    HTTP_request_free(&req);
-    if (res.headers != NULL)
-    {
-        char *val;
-        if ((val = hashmap_get(res.headers, "Content-Range")) != NULL)
-            free(val);
+                        res.code = 200; /* OK */
+                        MAP_put(res.headers, "Cache-Control", "max-age=60");
+                        HTTP_respond_file(&req, "./video.mp4", "video/mp4", res, fd);
+                        continue;
+                    }
+                    else
+                    {
+                        res.code = 404; /* Not Found */
+                        res.content = malloc(0);
+                        res.content_length = 0;
+                        STACK_push(res.stack, res.content);
+                    }
+                }
+                else if (strcmp(req.method, "POST") == 0)
+                {
+
+                    FILE *fp = fopen("./video.mp4", "w");
+                    fwrite(req.content, req.content_length, 1, fp);
+                    fclose(fp);
+                    res.code = 201; /* Created */
+                    HTTP_respond_file(&req, "./video.mp4", "video/mp4", res, fd);
+                    continue;
+                }
+                else
+                {
+                    res.code = 405; /* Method Not Allowed */
+                    res.content = malloc(0);
+                    res.content_length = 0;
+                    STACK_push(res.stack, res.content);
+                }
+            }
+            else
+            {
+                char path[strlen(req.path) + 3];
+                path[0] = '.';
+                path[1] = '/';
+                path[2] = '\0';
+                strcat(path + 2, req.path);
+                if (access(path, F_OK) == 0)
+                {
+
+                    res.code = 200; /* OK */
+                    HTTP_respond_file(&req, path, "*", res, fd);
+                    continue;
+                }
+                else
+                {
+                    res.code = 404; /* Not Found */
+                    res.content = malloc(0);
+                    res.content_length = 0;
+                    STACK_push(res.stack, res.content);
+                }
+            }
+        }
+        res.reason = HTTP_reason(res.code);
+        HTTP_send_response(&res, fd);
+        HTTP_request_free(&req);
+        HTTP_response_free(&res);
     }
-    HTTP_response_free(&res);
+    MAP_free(content_type.parameters);
+    close(fd);
 }
 
 void *thread_main(void *arg)
 {
-    handle(*((int *)arg));
+    handleconn(*((int *)arg));
     return NULL;
 }
 
@@ -182,7 +506,7 @@ int main(int argc, char **argv)
     else if (argc > 2)
     {
         printf("too many arguments\n");
-        exit(EXIT_FAILURE);
+        return 1;
     }
     else
     {
@@ -192,7 +516,7 @@ int main(int argc, char **argv)
         {
             printf("invalid port\n");
             printf("%s\n", endptr);
-            exit(EXIT_FAILURE);
+            return 1;
         }
     }
     /* create socket */
@@ -200,7 +524,7 @@ int main(int argc, char **argv)
     if (sockfd == -1)
     {
         printf("socket creation failed\n");
-        exit(EXIT_FAILURE);
+        return 1;
     }
     bzero(&server, sizeof(server));
 
@@ -213,11 +537,11 @@ int main(int argc, char **argv)
     if ((bind(sockfd, (struct sockaddr *)&server, sizeof(server))) != 0)
     {
         printf("socket bind failed\n");
-        exit(EXIT_FAILURE);
+        return 1;
     }
     while (1)
     {
-        int n = 16;
+        int n = 100;
         /* now server is ready to listen and verification */
         if ((listen(sockfd, n)) != 0)
             printf("Listen failed\n");
@@ -245,5 +569,5 @@ int main(int argc, char **argv)
     }
     close(sockfd);
     printf("socket closed\n");
-    exit(EXIT_SUCCESS);
+    return 0;
 }
