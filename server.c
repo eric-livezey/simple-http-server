@@ -31,61 +31,6 @@ void HTTP_print_request(HTTP_request *req)
     printf("\r\n");
 }
 
-char *strnstr(char *haystack, char *needle, int len)
-{
-    int needle_len = strlen(needle);
-    int max = len - needle_len + 1;
-    for (int i = 0; i < max; i++)
-        if (strncmp(&haystack[i], needle, needle_len) == 0)
-            return &haystack[i];
-    return NULL;
-}
-
-char *strntok(char *str, char *tok, unsigned long n, char **saveptr, unsigned long *saven)
-{
-    if (str == NULL)
-    {
-        str = *saveptr;
-        n = *saven;
-    }
-    unsigned long len = strlen(tok), max = n - len + 1;
-    for (unsigned long i = 0; i < max; i++)
-    {
-        if (strncmp(str + i, tok, len) == 0)
-        {
-            str[i] = '\0';
-            *saveptr = str + i + len;
-            *saven = n - i - 1;
-            return str;
-        }
-    }
-    return NULL;
-}
-
-struct HTTP_response *HTTP_handle_head_file()
-{
-}
-
-struct HTTP_response *HTTP_handle_file(struct HTTP_request *req, char *path, char *content_type, struct HTTP_response *res)
-{
-    if (strcmp(req->path, "GET") == 0)
-    {
-    }
-    else if (strcmp(req->path, "HEAD") == 0)
-    {
-    }
-    else if (strcmp(req->path, "PUT") == 0)
-    {
-    }
-    else if (strcmp(req->path, "DELETE") == 0)
-    {
-    }
-    else
-    {
-        res->code = 405;
-    }
-}
-
 char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_response res, int fd)
 {
     MAP_put(res.headers, "Accept-Ranges", "bytes");
@@ -128,6 +73,7 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
             sprintf(content_length, "%lu", size);
             MAP_put(res.headers, "Content-Length", content_length);
             HTTP_send_response(&res, fd);
+            if (strcmp(req->method, "HEAD") != 0)
             /* body */
             send_file(fd, fp, range[0], range[1]);
         }
@@ -144,6 +90,7 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
         MAP_put(res.headers, "Content-Length", content_length);
         HTTP_send_response(&res, fd);
         /* body */
+        if (strcmp(req->method, "HEAD") != 0)
         send_file(fd, fp, 0, size - 1);
     }
     fclose(fp);
@@ -260,9 +207,9 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
         if (content_length > 8UL * (1 << 30)) // 8 GB limit
         {
             /*
-             * NOTE: if we don't read the request to completion, the client will likely not recieve the response
+             * NOTE: if we don't read the request to completion, the client will likely not receive the response
              * but reading the whole request will take far too long with 8GB+ file sizes and thus waste resources
-             * so, even though the request may be valid, we reject it immediately and close the connection
+             * so even though the request may be valid, we reject it immediately and close the connection.
              */
             result->flags |= CONTENT_TOO_LARGE;
             return NULL;
@@ -308,11 +255,11 @@ void handleconn(int fd)
         res.stack = STACK_new();
         if (HTTP_readreq_ex(fd, &req) == NULL)
         {
-            if (req.flags & (PARSE_ERROR | CONNECTION_ERROR | BAD_CONTENT_LENGTH) != 0)
+            if (req.flags & (CONNECTION_ERROR | PARSE_ERROR | BAD_CONTENT_LENGTH) != 0)
             {
                 res.code = 400; /* Bad Request */
             }
-            else if (req.flags & CONTENT_TOO_LARGE)
+            else if (req.flags & CONTENT_TOO_LARGE != 0)
             {
                 res.code = 413; /* Content Too Large */
             }
@@ -361,7 +308,8 @@ void handleconn(int fd)
                     parts.stack = STACK_new();
                     parse_multipart(req.content, req.content_length, v, &parts);
                     // Temporary implementation only takes the first part
-                    if (parts.length = 1)
+                    // different parts might have different content types and thus storing it is somewhat cumbersome
+                    if (parts.length == 1)
                     {
                         req.content = parts.parts[0].content;
                         req.content_length = parts.parts[0].content_length;
