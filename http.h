@@ -40,7 +40,7 @@ struct chunk
 typedef struct HTTP_request
 {
     char *method;
-    char *path;
+    char *target;
     MAP *query;
     char *protocol;
     MAP *headers;
@@ -77,7 +77,7 @@ char *HTTP_reason(unsigned short code);
 
 char *qstring(char *ptr, char **endptr);
 
-MAP *parse_query(char *ptr, MAP *result);
+MAP *parse_query(char *ptr, char **endptr, MAP *result);
 
 struct content_type *parse_content_type(char *ptr, struct content_type *result);
 

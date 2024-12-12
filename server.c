@@ -8,7 +8,7 @@
 
 void HTTP_print_request(HTTP_request *req)
 {
-    printf("%s %s", req->method, req->path);
+    printf("%s %s", req->method, req->target);
     struct entry **es = MAP_entry_set(req->query);
     int size = MAP_size(req->query);
     int i;
@@ -74,8 +74,8 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
             MAP_put(res.headers, "Content-Length", content_length);
             HTTP_send_response(&res, fd);
             if (strcmp(req->method, "HEAD") != 0)
-            /* body */
-            send_file(fd, fp, range[0], range[1]);
+                /* body */
+                send_file(fd, fp, range[0], range[1]);
         }
     }
     else
@@ -91,7 +91,7 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
         HTTP_send_response(&res, fd);
         /* body */
         if (strcmp(req->method, "HEAD") != 0)
-        send_file(fd, fp, 0, size - 1);
+            send_file(fd, fp, 0, size - 1);
     }
     fclose(fp);
     HTTP_request_free(req);
@@ -109,7 +109,7 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
     long i = 0, saven, ret;
     struct entry e;
     result->method = NULL;
-    result->path = NULL;
+    result->target = NULL;
     result->query = MAP_new(1);
     result->protocol = NULL;
     result->headers = MAP_new(1);
@@ -130,7 +130,7 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
     STACK_push(result->stack, data);
     if (HTTP_parse_reqln(data, result) == NULL)
     {
-        result->flags = PARSE_ERROR;
+        result->flags |= PARSE_ERROR;
         return NULL;
     }
     while (1)
@@ -188,12 +188,8 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
             ptr++;
         }
         for (i = 0; i < len; i++)
-        {
             if (strcasecmp(encodings[i], "chunked") == 0)
-            {
                 recv_chunks(fd, result);
-            }
-        }
     }
     else if (MAP_contains_key(result->headers, "Content-Length"))
     {
@@ -334,7 +330,7 @@ void handleconn(int fd)
             {
                 res.code = 501;
             }
-            else if (strcmp(req.path, "/") == 0)
+            else if (strcmp(req.target, "/") == 0)
             {
                 if (strcmp(req.method, "GET") == 0)
                 {
@@ -350,7 +346,7 @@ void handleconn(int fd)
                     STACK_push(res.stack, res.content);
                 }
             }
-            else if (strcmp(req.path, "/favicon.ico") == 0)
+            else if (strcmp(req.target, "/favicon.ico") == 0)
             {
                 if (strcmp(req.method, "GET") == 0)
                 {
@@ -407,11 +403,11 @@ void handleconn(int fd)
             }
             else
             {
-                char path[strlen(req.path) + 3];
+                char path[strlen(req.target) + 3];
                 path[0] = '.';
                 path[1] = '/';
                 path[2] = '\0';
-                strcat(path + 2, req.path);
+                strcat(path + 2, req.target);
                 if (access(path, F_OK) == 0)
                 {
 

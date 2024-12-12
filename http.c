@@ -51,7 +51,7 @@ struct chunk
 typedef struct HTTP_request
 {
     char *method;
-    char *path;
+    char *target;
     MAP *query;
     char *protocol;
     MAP *headers;
@@ -208,7 +208,9 @@ char *HTTP_reason(unsigned short code)
 }
 
 /*
- * -------- PARSING --------
+ * -----------------
+ * |    PARSING    |
+ * -----------------
  */
 
 char *qstring(char *ptr, char **endptr)
@@ -352,7 +354,7 @@ struct content_type *parse_content_type(char *ptr, struct content_type *result)
     return result;
 }
 
-MAP *parse_query(char *ptr, MAP *result)
+MAP *parse_query(char *ptr, char **eptr, MAP *result)
 {
     char *endptr = ptr, *k, *v;
     // '?'
@@ -361,7 +363,6 @@ MAP *parse_query(char *ptr, MAP *result)
     ptr++;
     while (1)
     {
-        *endptr = '\0';
         // pchar
         k = endptr = ptr;
         while (*endptr != '=' && ispchar(endptr))
@@ -369,9 +370,13 @@ MAP *parse_query(char *ptr, MAP *result)
         ptr = endptr;
         // '='
         if (*ptr != '=')
-            return NULL;
-        ptr++;
+        {
+            v = endptr;
+            MAP_put(result, k, v);
+            break;
+        }
         *endptr = '\0';
+        ptr++;
         // pchar
         v = endptr = ptr;
         while (*endptr != '&' && ispchar(endptr))
@@ -381,17 +386,16 @@ MAP *parse_query(char *ptr, MAP *result)
         // [ '&' ]
         if (*ptr != '&')
             break;
+        *endptr = '\0';
         ptr++;
     }
-    // '\0'
-    if (*ptr != '\0')
-        return NULL;
     *endptr = '\0';
     for (int i = 0; i < MAP_size(result); i++)
     {
         urldecode(MAP_entry_set(result)[i]->key, MAP_entry_set(result)[i]->key);
         urldecode(MAP_entry_set(result)[i]->value, MAP_entry_set(result)[i]->value);
     }
+    *eptr = endptr;
     return result;
 }
 
@@ -412,7 +416,7 @@ struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result)
     *endptr = '\0';
     // request-target
     // TODO: better validation
-    result->path = endptr = ptr;
+    result->target = endptr = ptr;
     while (*endptr != ' ' && !iscrlf(endptr))
         endptr++;
     ptr = endptr;
@@ -446,13 +450,19 @@ struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result)
     if (!iscrlf(endptr))
         return NULL;
     *endptr = '\0';
-    ptr = result->path;
+    ptr = result->target;
     while (*ptr != '\0')
-        if (*ptr == '?' && parse_query(ptr, result->query) != NULL)
-            break;
+        if (*ptr == '?')
+            if (parse_query(ptr, &endptr, result->query) != NULL)
+                break;
+            else
+                return NULL;
         else
             ptr++;
-    urldecode(result->path, result->path);
+    *ptr = '\0';
+    if (*endptr != '\0')
+        return NULL;
+    urldecode(result->target, result->target);
     return result;
 }
 
@@ -909,7 +919,7 @@ long HTTP_reqsize(HTTP_request *req)
     int i;
     long len = 6;
     len += strlen(req->method);
-    len += strlen(req->path);
+    len += strlen(req->target);
     if (req->query != NULL)
     {
         struct entry **es = MAP_entry_set(req->query);
@@ -944,7 +954,7 @@ char *HTTP_reqmsg(HTTP_request *req, char *buffer)
     long len = 0;
     /* write message */
     buffer[0] = '\0';
-    len += sprintf(buffer, "%s %s", req->method, req->path);
+    len += sprintf(buffer, "%s %s", req->method, req->target);
     if (req->query != NULL)
     {
         struct entry **es = MAP_entry_set(req->query);
