@@ -363,7 +363,7 @@ void handleconn(int fd)
                     STACK_push(res.stack, res.content);
                 }
             }
-            else if (strcmp(req.path, "/video.mp4") == 0)
+            else if (strcmp(req.target, "/video.mp4") == 0)
             {
                 if (strcmp(req.method, "GET") == 0)
                 {
