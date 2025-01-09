@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include "http.h"
 #define PORT 8000
@@ -81,7 +82,6 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
     else
     {
 
-        res.code = 200; /* OK */
         res.reason = HTTP_reason(res.code);
         /* content-length */
         char content_length[numlenul(size)];
@@ -238,12 +238,13 @@ void handleconn(int fd)
     HTTP_response res;
     struct content_type content_type;
     struct multipart parts;
+    struct stat path_stat;
     content_type.parameters = MAP_new(1);
     while (persist)
     {
         res.protocol = "HTTP/1.1";
         res.code = 200;
-        res.reason = "OK";
+        res.reason = HTTP_reason(res.code);
         res.headers = MAP_new(1);
         res.content = NULL;
         res.content_length = 0;
@@ -334,15 +335,13 @@ void handleconn(int fd)
             {
                 if (strcmp(req.method, "GET") == 0)
                 {
-                    res.code = 200; /* OK */
                     HTTP_respond_file(&req, "./index.html", "text/html", res, fd);
                     continue;
                 }
                 else
                 {
                     res.code = 405; /* Method Not Allowed */
-                    res.content = malloc(0);
-                    res.content_length = 0;
+                    MAP_put(res.headers, "Content-Length", "0");
                     STACK_push(res.stack, res.content);
                 }
             }
@@ -350,16 +349,14 @@ void handleconn(int fd)
             {
                 if (strcmp(req.method, "GET") == 0)
                 {
-                    MAP_put(res.headers, "Cache-Control", "max-age=6000");
-                    res.code = 200; /* OK */
+                    MAP_put(res.headers, "Cache-Control", "max-age=60000");
                     HTTP_respond_file(&req, "./favicon.svg", "image/svg+xml", res, fd);
                     continue;
                 }
                 else
                 {
                     res.code = 405; /* Method Not Allowed */
-                    res.content = malloc(0);
-                    res.content_length = 0;
+                    MAP_put(res.headers, "Content-Length", "0");
                     STACK_push(res.stack, res.content);
                 }
             }
@@ -370,7 +367,6 @@ void handleconn(int fd)
                     if (access("./video.mp4", F_OK) == 0)
                     {
 
-                        res.code = 200; /* OK */
                         MAP_put(res.headers, "Cache-Control", "max-age=60");
                         HTTP_respond_file(&req, "./video.mp4", "video/mp4", res, fd);
                         continue;
@@ -378,8 +374,7 @@ void handleconn(int fd)
                     else
                     {
                         res.code = 404; /* Not Found */
-                        res.content = malloc(0);
-                        res.content_length = 0;
+                        MAP_put(res.headers, "Content-Length", "0");
                         STACK_push(res.stack, res.content);
                     }
                 }
@@ -396,8 +391,7 @@ void handleconn(int fd)
                 else
                 {
                     res.code = 405; /* Method Not Allowed */
-                    res.content = malloc(0);
-                    res.content_length = 0;
+                    MAP_put(res.headers, "Content-Length", "0");
                     STACK_push(res.stack, res.content);
                 }
             }
@@ -408,18 +402,16 @@ void handleconn(int fd)
                 path[1] = '/';
                 path[2] = '\0';
                 strcat(path + 2, req.target);
-                if (access(path, F_OK) == 0)
+                if (access(path, F_OK) == 0 && stat(path, &path_stat) == 0 && S_ISREG(path_stat.st_mode))
                 {
 
-                    res.code = 200; /* OK */
                     HTTP_respond_file(&req, path, "*", res, fd);
                     continue;
                 }
                 else
                 {
                     res.code = 404; /* Not Found */
-                    res.content = malloc(0);
-                    res.content_length = 0;
+                    MAP_put(res.headers, "Content-Length", "0");
                     STACK_push(res.stack, res.content);
                 }
             }
