@@ -12,6 +12,8 @@
 #define ispctenc(ptr) ((ptr)[0] == '%' && isxdigit((ptr)[1]) && isxdigit((ptr)[2]))
 #define ispchar(ptr) (isunreserved(*(ptr)) || ispctenc(ptr) || issubdelim(*(ptr)) || *(ptr) == ':' || *(ptr) == '@')
 
+#define MAX_LINE_SIZE 8 * (1 << 20)
+
 enum FLAGS
 {
     CONNECTION_ERROR = 0b00000001,
@@ -205,6 +207,59 @@ char *HTTP_reason(unsigned short code)
     default:
         return NULL;
     }
+}
+
+MAP *content_type_map;
+char content_type_map_initialized = 0;
+
+char *HTTP_content_type(char *ext)
+{
+    if (!content_type_map_initialized)
+    {
+        content_type_map_initialized = 1;
+        MAP *map = MAP_new(1);
+        // video/matroska
+        MAP_put(map, "mkv", "video/matroska");
+        // video/matroska-3d
+        MAP_put(map, "mk3d", "video/matroska-3d");
+        // audio/matroska
+        MAP_put(map, "mka", "audio/matroska");
+        // application/octet-stream
+        MAP_put(map, "mks", "application/octet-stream");
+        // video/mp4
+        MAP_put(map, "mp4", "video/mp4");
+        MAP_put(map, "m4g4", "video/mp4");
+        // audio/mpeg
+        MAP_put(map, "mp3", "audio/mpeg");
+        // video/webm
+        MAP_put(map, "webm", "video/webm");
+        // image/webp
+        MAP_put(map, "webp", "image/webp");
+        // image/svg+xml
+        MAP_put(map, "svg", "image/svg+xml");
+        MAP_put(map, "svgz", "image/svg+xml");
+        // image/jpeg
+        MAP_put(map, "jpg", "image/jpeg");
+        MAP_put(map, "jpeg", "image/jpeg");
+        // image/png
+        MAP_put(map, "png", "image/png");
+        // image/gif
+        MAP_put(map, "gif", "image/gif");
+        // text/javascript
+        MAP_put(map, "js", "text/javascript");
+        MAP_put(map, "mjs", "text/javascript");
+        // application/json
+        MAP_put(map, "json", "application/json");
+        // text/html
+        MAP_put(map, "html", "text/html");
+        MAP_put(map, "htm", "text/html");
+        // text/css
+        MAP_put(map, "css", "text/css");
+        // text/plain
+        MAP_put(map, "txt", "text/plain");
+        content_type_map = map;
+    }
+    return MAP_get_or_default(content_type_map, ext, "*");
 }
 
 /*
@@ -762,49 +817,74 @@ struct multipart *parse_multipart(char *content, unsigned long content_length, c
     return result;
 }
 
+__thread char buffer[65535];
+__thread unsigned short buffer_pos = 0;
+__thread unsigned short buffer_size = 0;
+
 long recv_line(int fd, char **ptr)
 {
-    char c, ret, buffer[1024], *temp, *data = *ptr = NULL;
-    short i = 0;
+    char done = 0, *temp, *data = *ptr = NULL;
+    unsigned short n, i;
     long size = 0;
-    while (!(c == '\n' && (i > 1 && buffer[i - 2] == '\r' || data != NULL && i == 1 && data[size - 1] == '\r')))
+    while (!done)
     {
-        /* read a character */
-        ret = recv(fd, &c, 1, 0);
-
-        /* error or EOF */
-        if (ret <= -1)
+        // if the size is greater than the max size
+        if (size > MAX_LINE_SIZE)
         {
+            // free data and return -2
             if (data != NULL)
                 free(data);
-            return -1;
+            return -2;
         }
-
-        /* append character to buffer or concat if buffer is full */
-        if (i == sizeof(buffer))
+        // if the buffer postion is past the size of the buffer
+        if (buffer_pos >= buffer_size)
         {
+            // receive new data
+            if ((n = recv(fd, buffer, sizeof(buffer), 0)) < 0)
+            {
+                if (data != NULL)
+                    free(data);
+                return -1;
+            }
+            // buffer position is 0
+            buffer_pos = 0;
+            // buffer size is the returned size
+            buffer_size = n;
+        }
+        // if the first character in the buffer and the last character of data make a crlf
+        if (buffer_pos == 0 && size > 0 && data[size - 1] == '\r' && buffer[0] == '\n')
+            done = 1;
+        // search for crlf in the buffer
+        for (i = buffer_pos; i < buffer_size; i++)
+        {
+            if (i > 0 && buffer[i - 1] == '\r' && buffer[i] == '\n')
+            {
+                done = 1;
+                break;
+            }
+        }
+        // if we reached the end of the buffer
+        if (i == sizeof(buffer) - 1)
+        {
+            // concatenate data and buffer
             temp = data;
-            data = buffcat(data, size, buffer, sizeof(buffer));
+            data = buffcat(data, size, buffer + buffer_pos, sizeof(buffer) - buffer_pos);
             if (temp != NULL)
                 free(temp);
-            size += sizeof(buffer);
-            if (size + sizeof(buffer) >= 4UL * (1 << 30)) // 4 GB limit
-                return -2;
-            i = 0;
+            // add buffer size - buffer position to the size
+            size += sizeof(buffer) - buffer_pos;
         }
         else
         {
-            buffer[i] = c;
-            i++;
+            temp = data;
+            data = buffcat(data, size, buffer + buffer_pos, i + 1 - buffer_pos);
+            if (temp != NULL)
+                free(temp);
+            // add read size to size
+            size += i + 1 - buffer_pos;
         }
-    }
-    if (i > 0)
-    {
-        temp = data;
-        data = buffcat(data, size, buffer, i);
-        if (temp != NULL)
-            free(temp);
-        size += i;
+        // buffer position is i + 1
+        buffer_pos = i + 1;
     }
     *ptr = data;
     return size - 2;

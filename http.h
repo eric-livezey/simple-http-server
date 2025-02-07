@@ -75,6 +75,8 @@ char *HTTP_date(struct tm *tm);
 
 char *HTTP_reason(unsigned short code);
 
+char *HTTP_content_type(char *ext);
+
 char *qstring(char *ptr, char **endptr);
 
 MAP *parse_query(char *ptr, char **endptr, MAP *result);

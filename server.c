@@ -252,13 +252,13 @@ void handleconn(int fd)
         res.stack = STACK_new();
         if (HTTP_readreq_ex(fd, &req) == NULL)
         {
-            if (req.flags & (CONNECTION_ERROR | PARSE_ERROR | BAD_CONTENT_LENGTH) != 0)
-            {
-                res.code = 400; /* Bad Request */
-            }
-            else if (req.flags & CONTENT_TOO_LARGE != 0)
+            if ((req.flags & CONTENT_TOO_LARGE) != 0)
             {
                 res.code = 413; /* Content Too Large */
+            }
+            else
+            {
+                res.code = 400; /* Bad Request */
             }
             MAP_put(res.headers, "Connection", "close");
             persist = 0;
@@ -342,14 +342,13 @@ void handleconn(int fd)
                 {
                     res.code = 405; /* Method Not Allowed */
                     MAP_put(res.headers, "Content-Length", "0");
-                    STACK_push(res.stack, res.content);
                 }
             }
             else if (strcmp(req.target, "/favicon.ico") == 0)
             {
                 if (strcmp(req.method, "GET") == 0)
                 {
-                    MAP_put(res.headers, "Cache-Control", "max-age=60000");
+                    MAP_put(res.headers, "Cache-Control", "max-age=6000");
                     HTTP_respond_file(&req, "./favicon.svg", "image/svg+xml", res, fd);
                     continue;
                 }
@@ -357,7 +356,6 @@ void handleconn(int fd)
                 {
                     res.code = 405; /* Method Not Allowed */
                     MAP_put(res.headers, "Content-Length", "0");
-                    STACK_push(res.stack, res.content);
                 }
             }
             else if (strcmp(req.target, "/video.mp4") == 0)
@@ -375,7 +373,6 @@ void handleconn(int fd)
                     {
                         res.code = 404; /* Not Found */
                         MAP_put(res.headers, "Content-Length", "0");
-                        STACK_push(res.stack, res.content);
                     }
                 }
                 else if (strcmp(req.method, "POST") == 0)
@@ -392,7 +389,6 @@ void handleconn(int fd)
                 {
                     res.code = 405; /* Method Not Allowed */
                     MAP_put(res.headers, "Content-Length", "0");
-                    STACK_push(res.stack, res.content);
                 }
             }
             else
@@ -404,15 +400,31 @@ void handleconn(int fd)
                 strcat(path + 2, req.target);
                 if (access(path, F_OK) == 0 && stat(path, &path_stat) == 0 && S_ISREG(path_stat.st_mode))
                 {
-
-                    HTTP_respond_file(&req, path, "*", res, fd);
+                    if (strcmp(req.method, "GET") == 0)
+                    {
+                        if (strncmp(req.target, "/assets/", 8) == 0)
+                        {
+                            MAP_put(res.headers, "Cache-Control", "max-age=31536000");
+                        }
+                        char *content_type = "*";
+                        int index = strindexof(req.target, '.');
+                        if (index >= 0)
+                        {
+                            content_type = HTTP_content_type(req.target + index + 1); // infer content type
+                        }
+                        HTTP_respond_file(&req, path, content_type, res, fd);
                     continue;
+                    }
+                    else
+                    {
+                        res.code = 405; /* Method Not Allowed */
+                        MAP_put(res.headers, "Content-Length", "0");
+                    }
                 }
                 else
                 {
                     res.code = 404; /* Not Found */
                     MAP_put(res.headers, "Content-Length", "0");
-                    STACK_push(res.stack, res.content);
                 }
             }
         }

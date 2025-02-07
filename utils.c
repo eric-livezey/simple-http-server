@@ -140,6 +140,20 @@ unsigned short strtous(char *nptr, char **endptr, int base)
     return strtoul(nptr, endptr, base);
 }
 
+int strindexof(char *ptr, char c)
+{
+    int i = 0;
+    while (ptr[i] != '\0')
+    {
+        if (ptr[i] == c)
+        {
+            return i;
+        }
+        i++;
+    }
+    return -1;
+}
+
 int numlenul(unsigned long x)
 {
     int i = 1;

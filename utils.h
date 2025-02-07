@@ -26,6 +26,8 @@ void urldecode(char *dst, const char *src);
 
 unsigned short strtous(char *nptr, char **endptr, int base);
 
+int strindexof(char *ptr, char c);
+
 int numlenul(unsigned long x);
 
 int log2floor(int x);
