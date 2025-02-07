@@ -393,11 +393,9 @@ void handleconn(int fd)
             }
             else
             {
-                char path[strlen(req.target) + 3];
+                char path[strlen(req.target) + 2];
                 path[0] = '.';
-                path[1] = '/';
-                path[2] = '\0';
-                strcat(path + 2, req.target);
+                strcpy(path + 1, req.target);
                 if (access(path, F_OK) == 0 && stat(path, &path_stat) == 0 && S_ISREG(path_stat.st_mode))
                 {
                     if (strcmp(req.method, "GET") == 0)
@@ -407,13 +405,13 @@ void handleconn(int fd)
                             MAP_put(res.headers, "Cache-Control", "max-age=31536000");
                         }
                         char *content_type = "*";
-                        int index = strindexof(req.target, '.');
+                        int index = strlastindexof(req.target, '.');
                         if (index >= 0)
                         {
                             content_type = HTTP_content_type(req.target + index + 1); // infer content type
                         }
                         HTTP_respond_file(&req, path, content_type, res, fd);
-                    continue;
+                        continue;
                     }
                     else
                     {

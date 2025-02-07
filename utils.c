@@ -140,6 +140,20 @@ unsigned short strtous(char *nptr, char **endptr, int base)
     return strtoul(nptr, endptr, base);
 }
 
+int strlastindexof(char *ptr, char c)
+{
+    int index = -1, i = 0;
+    while (ptr[i] != '\0')
+    {
+        if (ptr[i] == c)
+        {
+            index = i;
+        }
+        i++;
+    }
+    return index;
+}
+
 int strindexof(char *ptr, char c)
 {
     int i = 0;
