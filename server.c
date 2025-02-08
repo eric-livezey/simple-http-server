@@ -7,8 +7,12 @@
 #include "http.h"
 #define PORT 8000
 
+char debug = 0;
+
 void HTTP_print_request(HTTP_request *req)
 {
+    printf("================ REQUEST  ================\r\n\r\n");
+
     printf("%s %s", req->method, req->target);
     struct entry **es = MAP_entry_set(req->query);
     int size = MAP_size(req->query);
@@ -30,6 +34,16 @@ void HTTP_print_request(HTTP_request *req)
         printf("%s: %s\r\n", es[i]->key, es[i]->value);
     }
     printf("\r\n");
+}
+
+void HTTP_print_response(HTTP_response *res)
+{
+    unsigned long size = HTTP_ressize(res);
+    char *resmsg = malloc(size);
+    HTTP_resmsg(res, resmsg);
+    resmsg[size - res->content_length] = '\0';
+    printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", resmsg); /* print response (excluding body) */
+    free(resmsg);
 }
 
 char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_response res, int fd)
@@ -54,6 +68,8 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
             sprintf(content_range, "bytes */%ld", size);
             MAP_put(res.headers, "Content-Range", content_range);
             HTTP_send_response(&res, fd);
+            if (debug)
+                HTTP_print_response(&res);
         }
         else
         {
@@ -77,6 +93,8 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
             if (strcmp(req->method, "HEAD") != 0)
                 /* body */
                 send_file(fd, fp, range[0], range[1]);
+            if (debug)
+                HTTP_print_response(&res);
         }
     }
     else
@@ -92,6 +110,8 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
         /* body */
         if (strcmp(req->method, "HEAD") != 0)
             send_file(fd, fp, 0, size - 1);
+        if (debug)
+            HTTP_print_response(&res);
     }
     fclose(fp);
     HTTP_request_free(req);
@@ -125,6 +145,8 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
             result->flags |= CONNECTION_ERROR;
         if (ret == -2)
             result->flags |= CONTENT_TOO_LARGE;
+        if (ret == -3)
+            result->flags |= CONNECTION_CLOSED;
         return NULL;
     }
     STACK_push(result->stack, data);
@@ -142,6 +164,8 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
                 result->flags |= CONNECTION_ERROR;
             if (ret == -2)
                 result->flags |= CONTENT_TOO_LARGE;
+            if (ret == -3)
+                result->flags |= CONNECTION_CLOSED;
             return NULL;
         }
         STACK_push(result->stack, data);
@@ -252,21 +276,19 @@ void handleconn(int fd)
         res.stack = STACK_new();
         if (HTTP_readreq_ex(fd, &req) == NULL)
         {
+            if ((req.flags & CONNECTION_CLOSED) != 0)
+                break;
             if ((req.flags & CONTENT_TOO_LARGE) != 0)
-            {
                 res.code = 413; /* Content Too Large */
-            }
             else
-            {
                 res.code = 400; /* Bad Request */
-            }
             MAP_put(res.headers, "Connection", "close");
             persist = 0;
         }
         else
         {
-            printf("================ REQUEST  ================\r\n\r\n");
-            HTTP_print_request(&req);
+            if (debug)
+                HTTP_print_request(&req);
             v = MAP_get(req.headers, "Connection");
             if (v != NULL && strcmp(v, "close") == 0 || strcmp(req.protocol, "HTTP/1.0") && (v == NULL || strcmp(v, "keep-alive") != 0))
             {
@@ -285,6 +307,8 @@ void handleconn(int fd)
                     res.code = 400; /* Bad Request */
                     res.reason = HTTP_reason(res.code);
                     HTTP_send_response(&res, fd);
+                    if (debug)
+                        HTTP_print_response(&res);
                     HTTP_request_free(&req);
                     HTTP_response_free(&res);
                     MAP_clear(content_type.parameters);
@@ -297,6 +321,8 @@ void handleconn(int fd)
                         res.code = 400; /* Bad Request */
                         res.reason = HTTP_reason(res.code);
                         HTTP_send_response(&res, fd);
+                        if (debug)
+                            HTTP_print_response(&res);
                         HTTP_request_free(&req);
                         HTTP_response_free(&res);
                         MAP_clear(content_type.parameters);
@@ -428,6 +454,8 @@ void handleconn(int fd)
         }
         res.reason = HTTP_reason(res.code);
         HTTP_send_response(&res, fd);
+        if (debug)
+            HTTP_print_response(&res);
         HTTP_request_free(&req);
         HTTP_response_free(&res);
     }
@@ -443,26 +471,35 @@ void *thread_main(void *arg)
 
 int main(int argc, char **argv)
 {
-    unsigned short port;
+    char *ptr;
+    unsigned short port = PORT;
     int sockfd, connfd, len, i;
     struct sockaddr_in server, client;
 
-    if (argc < 2)
-        port = PORT;
-    else if (argc > 2)
+    int j = 0;
+    for (i = 1; i < argc; i++)
     {
-        printf("too many arguments\n");
-        return 1;
-    }
-    else
-    {
-        char *endptr = NULL;
-        port = (unsigned short)strtol(argv[1], &endptr, 10);
-        if (*argv[1] == '\0' || *endptr != '\0')
+        ptr = argv[i];
+        if (*ptr == '-')
         {
-            printf("invalid port\n");
-            printf("%s\n", endptr);
-            return 1;
+            if (strcmp(ptr, "--debug") == 0)
+                debug = 1;
+            else
+            {
+                printf("unrecognized flag: %s\n", ptr);
+                return 1;
+            }
+        }
+        else if (j == 0)
+        {
+            char *endptr = NULL;
+            port = (unsigned short)strtol(ptr, &endptr, 10);
+            if (*ptr == '\0' || *endptr != '\0')
+            {
+                printf("invalid port: %s\n", ptr);
+                return 1;
+            }
+            j++;
         }
     }
     /* create socket */

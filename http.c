@@ -12,6 +12,7 @@
 #define ispctenc(ptr) ((ptr)[0] == '%' && isxdigit((ptr)[1]) && isxdigit((ptr)[2]))
 #define ispchar(ptr) (isunreserved(*(ptr)) || ispctenc(ptr) || issubdelim(*(ptr)) || *(ptr) == ':' || *(ptr) == '@')
 
+// 8 MiB
 #define MAX_LINE_SIZE 8 * (1 << 20)
 
 enum FLAGS
@@ -19,7 +20,8 @@ enum FLAGS
     CONNECTION_ERROR = 0b00000001,
     PARSE_ERROR = 0b00000010,
     BAD_CONTENT_LENGTH = 0b00000100,
-    CONTENT_TOO_LARGE = 0b00001000
+    CONTENT_TOO_LARGE = 0b00001000,
+    CONNECTION_CLOSED = 0b00010000
 };
 
 struct part
@@ -846,6 +848,10 @@ long recv_line(int fd, char **ptr)
                     free(data);
                 return -1;
             }
+            // if we recieved 0 bytes
+            if (n == 0)
+                // return -3 indicating the connection was closed
+                return -3;
             // buffer position is 0
             buffer_pos = 0;
             // buffer size is the returned size
@@ -905,6 +911,8 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
             result->flags = CONNECTION_ERROR;
         if (ret == -2)
             result->flags = CONTENT_TOO_LARGE;
+        if (ret == -3)
+            result->flags = CONNECTION_CLOSED;
         return NULL;
     }
     STACK_push(result->stack, data);
@@ -941,6 +949,8 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
                 result->flags = CONNECTION_ERROR;
             if (ret == -2)
                 result->flags = CONTENT_TOO_LARGE;
+            if (ret == -3)
+                result->flags = CONNECTION_CLOSED;
             return NULL;
         }
         temp = result->content;
@@ -957,6 +967,8 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
                 result->flags = CONNECTION_ERROR;
             if (ret == -2)
                 result->flags = CONTENT_TOO_LARGE;
+            if (ret == -3)
+                result->flags = CONNECTION_CLOSED;
             return NULL;
         }
         STACK_push(result->stack, data);
@@ -972,6 +984,17 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
     while (1)
     {
         size = recv_line(fd, &data);
+        if (size < 0)
+        {
+            STACK_free(result->stack);
+            if (size == -1)
+                result->flags = CONNECTION_ERROR;
+            if (size == -2)
+                result->flags = CONTENT_TOO_LARGE;
+            if (size == -3)
+                result->flags = CONNECTION_CLOSED;
+            return NULL;
+        }
         STACK_push(result->stack, data);
         if (size == 0)
             break;
@@ -1102,9 +1125,6 @@ char *HTTP_resmsg(HTTP_response *res, char *result)
             len += sprintf(result + len, "%s: %s\r\n", es[i]->key, es[i]->value);
     }
     strcat(result + len, "\r\n");
-
-    printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", result); /* print response (excluding body) */
-
     len += 2;
     if (res->content != NULL) /* body */
         memcpy(result + len, res->content, res->content_length);
