@@ -41,16 +41,16 @@ void HTTP_print_response(HTTP_response *res)
     unsigned long size = HTTP_ressize(res);
     char *resmsg = malloc(size);
     HTTP_resmsg(res, resmsg);
-    resmsg[size - res->content_length] = '\0';
+    resmsg[size - res->content_length - 1] = '\0';
     printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", resmsg); /* print response (excluding body) */
     free(resmsg);
 }
 
-char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_response res, int fd)
+char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_response *res, int fd)
 {
-    MAP_put(res.headers, "Accept-Ranges", "bytes");
-    MAP_put_if_absent(res.headers, "Cache-Control", "no-cache");
-    MAP_put(res.headers, "Content-Type", content_type);
+    MAP_put(res->headers, "Accept-Ranges", "bytes");
+    MAP_put_if_absent(res->headers, "Cache-Control", "no-cache");
+    MAP_put(res->headers, "Content-Type", content_type);
     FILE *fp = fopen(path, "r");
     fseek(fp, 0L, SEEK_END);
     unsigned long size = ftell(fp); /* file size */
@@ -61,61 +61,61 @@ char HTTP_respond_file(HTTP_request *req, char *path, char *content_type, HTTP_r
         parse_range(rangeh, size, range);
         if (range == NULL || range[0] < 0 || range[0] >= size || range[1] < range[0])
         {
-            res.code = 416; /* Range Not Satisfiable */
-            res.reason = HTTP_reason(res.code);
+            res->code = 416; /* Range Not Satisfiable */
+            res->reason = HTTP_reason(res->code);
             char content_range[9 + numlenul(size)];
             content_range[0] = '\0';
             sprintf(content_range, "bytes */%ld", size);
-            MAP_put(res.headers, "Content-Range", content_range);
-            HTTP_send_response(&res, fd);
+            MAP_put(res->headers, "Content-Range", content_range);
+            HTTP_send_response(res, fd);
             if (debug)
-                HTTP_print_response(&res);
+                HTTP_print_response(res);
         }
         else
         {
             if (range[1] > size - 1) /* last pos is capped at size - 1 */
                 range[1] = size - 1;
-            res.code = 206; /* Partial Content */
-            res.reason = HTTP_reason(res.code);
+            res->code = 206; /* Partial Content */
+            res->reason = HTTP_reason(res->code);
             /* content-range */
             char content_range[9 + numlenul(range[0]) + numlenul(range[1]) + numlenul(size)];
             content_range[0] = '\0';
             sprintf(content_range, "bytes %ld-%ld/%ld", range[0], range[1], size);
-            MAP_put(res.headers, "Content-Range", content_range);
+            MAP_put(res->headers, "Content-Range", content_range);
             /* size */
             size = range[1] - range[0] + 1;
             /* content-length */
             char content_length[numlenul(size)];
             content_length[0] = '\0';
             sprintf(content_length, "%lu", size);
-            MAP_put(res.headers, "Content-Length", content_length);
-            HTTP_send_response(&res, fd);
+            MAP_put(res->headers, "Content-Length", content_length);
+            HTTP_send_response(res, fd);
             if (strcmp(req->method, "HEAD") != 0)
                 /* body */
                 send_file(fd, fp, range[0], range[1]);
             if (debug)
-                HTTP_print_response(&res);
+                HTTP_print_response(res);
         }
     }
     else
     {
 
-        res.reason = HTTP_reason(res.code);
+        res->reason = HTTP_reason(res->code);
         /* content-length */
         char content_length[numlenul(size)];
         content_length[0] = '\0';
         sprintf(content_length, "%lu", size);
-        MAP_put(res.headers, "Content-Length", content_length);
-        HTTP_send_response(&res, fd);
+        MAP_put(res->headers, "Content-Length", content_length);
+        HTTP_send_response(res, fd);
         /* body */
         if (strcmp(req->method, "HEAD") != 0)
             send_file(fd, fp, 0, size - 1);
         if (debug)
-            HTTP_print_response(&res);
+            HTTP_print_response(res);
     }
     fclose(fp);
     HTTP_request_free(req);
-    HTTP_response_free(&res);
+    HTTP_response_free(res);
 }
 
 /**
@@ -361,7 +361,7 @@ void handleconn(int fd)
             {
                 if (strcmp(req.method, "GET") == 0)
                 {
-                    HTTP_respond_file(&req, "./index.html", "text/html", res, fd);
+                    HTTP_respond_file(&req, "./index.html", "text/html", &res, fd);
                     continue;
                 }
                 else
@@ -375,7 +375,7 @@ void handleconn(int fd)
                 if (strcmp(req.method, "GET") == 0)
                 {
                     MAP_put(res.headers, "Cache-Control", "max-age=6000");
-                    HTTP_respond_file(&req, "./favicon.svg", "image/svg+xml", res, fd);
+                    HTTP_respond_file(&req, "./favicon.svg", "image/svg+xml", &res, fd);
                     continue;
                 }
                 else
@@ -392,7 +392,7 @@ void handleconn(int fd)
                     {
 
                         MAP_put(res.headers, "Cache-Control", "max-age=60");
-                        HTTP_respond_file(&req, "./video.mp4", "video/mp4", res, fd);
+                        HTTP_respond_file(&req, "./video.mp4", "video/mp4", &res, fd);
                         continue;
                     }
                     else
@@ -408,7 +408,7 @@ void handleconn(int fd)
                     fwrite(req.content, req.content_length, 1, fp);
                     fclose(fp);
                     res.code = 201; /* Created */
-                    HTTP_respond_file(&req, "./video.mp4", "video/mp4", res, fd);
+                    HTTP_respond_file(&req, "./video.mp4", "video/mp4", &res, fd);
                     continue;
                 }
                 else
@@ -436,7 +436,7 @@ void handleconn(int fd)
                         {
                             content_type = HTTP_content_type(req.target + index + 1); // infer content type
                         }
-                        HTTP_respond_file(&req, path, content_type, res, fd);
+                        HTTP_respond_file(&req, path, content_type, &res, fd);
                         continue;
                     }
                     else
