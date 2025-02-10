@@ -1,6 +1,8 @@
 #include <unistd.h>
 #include "hashmap.h"
 
+#define MAX_LINE_SIZE 8 * (1 << 20)
+
 enum FLAGS
 {
     CONNECTION_ERROR = 0b00000001,
@@ -49,7 +51,7 @@ typedef struct HTTP_request
     unsigned long content_length;
     MAP *trailers;
     STACK *stack;
-    char flags;
+    short flags;
 } HTTP_request;
 
 typedef struct HTTP_response
@@ -58,6 +60,7 @@ typedef struct HTTP_response
     short code;
     char *reason;
     MAP *headers;
+    char *file;
     char *content;
     unsigned long content_length;
     MAP *trailers;
@@ -102,8 +105,8 @@ long HTTP_reqsize(HTTP_request *req);
 
 char *HTTP_reqmsg(HTTP_request *req, char *result);
 
-long HTTP_ressize(HTTP_response *res);
+long HTTP_ressize(HTTP_response *res, char head);
 
-char *HTTP_resmsg(HTTP_response *res, char *result);
+char *HTTP_resmsg(HTTP_response *res, char *result, char head);
 
-long HTTP_send_response(HTTP_response *res, int connfd);
+long HTTP_send_response(HTTP_response *res, int connfd, char head);

@@ -10,7 +10,7 @@ STACK *STACK_new();
 
 void *STACK_pop(STACK *sp);
 
-void *STACK_push(STACK *stack, void *ptr);
+void STACK_push(STACK *stack, void *ptr);
 
 char STACK_empty(STACK *sp);
 

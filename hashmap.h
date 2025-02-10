@@ -8,7 +8,7 @@
 struct entry
 {
     char *key;
-    char *value;
+    void *value;
 };
 
 typedef struct hashmap_s MAP;
@@ -27,22 +27,22 @@ struct entry **MAP_entry_set(MAP *map);
 
 char **MAP_key_set(MAP *map);
 
-char **MAP_values(MAP *map);
+void **MAP_values(MAP *map);
 
-char *MAP_put(MAP *map, char *key, char *value);
+void *MAP_put(MAP *map, char *key, void *value);
 
 void MAP_put_all(MAP *map, MAP *m);
 
-char *MAP_get(MAP *map, char *key);
+void *MAP_get(MAP *map, char *key);
 
-char *MAP_remove(MAP *map, char *key);
+void *MAP_remove(MAP *map, char *key);
 
 int MAP_contains_key(MAP *map, char *key);
 
-int MAP_contains_value(MAP *map, char *value);
+int MAP_contains_value(MAP *map, void *value);
 
-char *MAP_get_or_default(MAP *map, char *key, char *defaultValue);
+void *MAP_get_or_default(MAP *map, char *key, void *defaultValue);
 
-char *MAP_put_if_absent(MAP *map, char *key, char *value);
+void *MAP_put_if_absent(MAP *map, char *key, void *value);
 
-char *MAP_replace(MAP *map, char *key, char *value);
+void *MAP_replace(MAP *map, char *key, void *value);

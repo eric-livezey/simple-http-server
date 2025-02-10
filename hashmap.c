@@ -8,14 +8,14 @@
 struct entry
 {
     char *key;
-    char *value;
+    void *value;
 };
 
 typedef struct node_s
 {
     int hash;
     char *key;
-    char *value;
+    void *value;
     struct node_s *next;
 } NODE;
 
@@ -23,7 +23,7 @@ typedef struct hashmap_s
 {
     struct entry **entryset;
     char **keyset;
-    char **values;
+    void **values;
     struct node_s **table;
     int capacity;
     int size;
@@ -48,7 +48,7 @@ int table_size_for(int cap)
                                                  : n + 1;
 }
 
-NODE *NODE_new(int hash, char *key, char *value, NODE *next)
+NODE *NODE_new(int hash, char *key, void *value, NODE *next)
 {
     NODE *node = malloc(sizeof(NODE));
     node->hash = hash;
@@ -267,12 +267,12 @@ char **MAP_key_set(MAP *map)
     return ks;
 }
 
-char **MAP_values(MAP *map)
+void **MAP_values(MAP *map)
 {
     struct entry **es;
     if ((es = MAP_entry_set(map)) != NULL)
     {
-        char **vals = malloc(map->size * sizeof(char *));
+        void **vals = malloc(map->size * sizeof(void *));
         for (int i = 0; i < map->size; i++)
             vals[i] = es[i]->value;
         map->values = vals;
@@ -281,7 +281,7 @@ char **MAP_values(MAP *map)
     return NULL;
 }
 
-char *MAP_put_val(MAP *map, int hash, char *key, char *value, char onlyIfAbsent, char evict)
+void *MAP_put_val(MAP *map, int hash, char *key, void *value, char onlyIfAbsent, char evict)
 {
     NODE **tab;
     int cap = 0;
@@ -318,7 +318,7 @@ char *MAP_put_val(MAP *map, int hash, char *key, char *value, char onlyIfAbsent,
         }
         if (e != NULL)
         { // existing mapping for key
-            char *oldValue = e->value;
+            void *oldValue = e->value;
             if (!onlyIfAbsent || oldValue == NULL)
                 e->value = value;
             return oldValue;
@@ -331,7 +331,7 @@ char *MAP_put_val(MAP *map, int hash, char *key, char *value, char onlyIfAbsent,
     return NULL;
 }
 
-char *MAP_put(MAP *map, char *key, char *value)
+void *MAP_put(MAP *map, char *key, void *value)
 {
     return MAP_put_val(map, hash(key, map->ignorecase), key, value, 0, 1);
 }
@@ -392,13 +392,13 @@ NODE *MAP_get_node(MAP *map, char *key)
     return NULL;
 }
 
-char *MAP_get(MAP *map, char *key)
+void *MAP_get(MAP *map, char *key)
 {
     NODE *e;
     return (e = MAP_get_node(map, key)) == NULL ? NULL : e->value;
 }
 
-NODE *MAP_remove_node(MAP *map, int hash, char *key, char *value, char matchValue, char movable)
+NODE *MAP_remove_node(MAP *map, int hash, char *key, void *value, char matchValue, char movable)
 {
     NODE **tab;
     NODE *p;
@@ -407,7 +407,7 @@ NODE *MAP_remove_node(MAP *map, int hash, char *key, char *value, char matchValu
     {
         NODE *node = NULL, *e;
         char *k;
-        char *v;
+        void *v;
         if (p->hash == hash && ((k = p->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
             node = p;
         else if ((e = p->next) != NULL)
@@ -441,12 +441,12 @@ NODE *MAP_remove_node(MAP *map, int hash, char *key, char *value, char matchValu
     return NULL;
 }
 
-char *MAP_remove(MAP *map, char *key)
+void *MAP_remove(MAP *map, char *key)
 {
     NODE *e;
     if ((e = MAP_remove_node(map, hash(key, map->ignorecase), key, NULL, 0, 1)) == NULL)
         return NULL;
-    char *value = e->value;
+    void *value = e->value;
     free(e);
     return value;
 }
@@ -456,10 +456,10 @@ int MAP_contains_key(MAP *map, char *key)
     return MAP_get_node(map, key) != NULL;
 }
 
-int MAP_contains_value(MAP *map, char *value)
+int MAP_contains_value(MAP *map, void *value)
 {
     NODE **tab;
-    char *v;
+    void *v;
     if ((tab = map->table) != NULL && map->size > 0)
         for (int i = 0; i < map->capacity; i++)
             for (NODE *e = tab[i]; e != NULL; e = e->next)
@@ -468,23 +468,23 @@ int MAP_contains_value(MAP *map, char *value)
     return 0;
 }
 
-char *MAP_get_or_default(MAP *map, char *key, char *defaultValue)
+void *MAP_get_or_default(MAP *map, char *key, void *defaultValue)
 {
     NODE *e;
     return (e = MAP_get_node(map, key)) == NULL ? defaultValue : e->value;
 }
 
-char *MAP_put_if_absent(MAP *map, char *key, char *value)
+void *MAP_put_if_absent(MAP *map, char *key, void *value)
 {
     return MAP_put_val(map, hash(key, map->ignorecase), key, value, 1, 1);
 }
 
-char *MAP_replace(MAP *map, char *key, char *value)
+void *MAP_replace(MAP *map, char *key, void *value)
 {
     NODE *e;
     if ((e = MAP_get_node(map, key)) != NULL)
     {
-        char *oldValue = e->value;
+        void *oldValue = e->value;
         e->value = value;
         return oldValue;
     }

@@ -72,6 +72,7 @@ typedef struct HTTP_response
     short code;
     char *reason;
     MAP *headers;
+    char *file;
     char *content;
     unsigned long content_length;
     MAP *trailers;
@@ -79,7 +80,9 @@ typedef struct HTTP_response
 } HTTP_response;
 
 /*
- * -------- UTILS --------
+ * -----------------
+ * |     UTILS     |
+ * -----------------
  */
 
 void HTTP_request_free(HTTP_request *req)
@@ -104,7 +107,7 @@ void HTTP_response_free(HTTP_response *res)
 
 char *HTTP_date_ex(struct tm *tm, char *result)
 {
-    result[0] = '\0';
+    *result = '\0';
     strftime(result, 30, "%a, %d %b %Y %T GMT", tm);
     return result;
 }
@@ -819,6 +822,12 @@ struct multipart *parse_multipart(char *content, unsigned long content_length, c
     return result;
 }
 
+/*
+ * -----------------
+ * |    NETWORK    |
+ * -----------------
+ */
+
 __thread char buffer[65535];
 __thread unsigned short buffer_pos = 0;
 __thread unsigned short buffer_size = 0;
@@ -1069,7 +1078,7 @@ char *HTTP_reqmsg(HTTP_request *req, char *buffer)
                 strcat(buffer + len, "?");
             else
                 strcat(buffer + len, "&");
-            len += sprintf(buffer + len, "%s=%s", es[i]->key, es[i]->value);
+            len += sprintf(buffer + len, "%s=%s", es[i]->key, (char *)es[i]->value);
         }
     }
     len += sprintf(buffer + len, " %s\r\n", req->protocol);
@@ -1078,7 +1087,7 @@ char *HTTP_reqmsg(HTTP_request *req, char *buffer)
         struct entry **es = MAP_entry_set(req->headers);
         int size = MAP_size(req->headers);
         for (i = 0; i < size; i++) /* headers */
-            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, es[i]->value);
+            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
     }
     strcat(buffer + len, "\r\n");
 
@@ -1088,7 +1097,7 @@ char *HTTP_reqmsg(HTTP_request *req, char *buffer)
     return buffer;
 }
 
-unsigned long HTTP_ressize(HTTP_response *res)
+unsigned long HTTP_ressize(HTTP_response *res, char head)
 {
     char *date;
     int i;
@@ -1106,12 +1115,12 @@ unsigned long HTTP_ressize(HTTP_response *res)
             len += strlen(es[i]->value);
         }
     }
-    if (res->content != NULL)
+    if (!head && res->content != NULL)
         len += res->content_length;
     return len;
 }
 
-char *HTTP_resmsg(HTTP_response *res, char *result)
+char *HTTP_resmsg(HTTP_response *res, char *result, char head)
 {
     long len = 0;
     /* write message */
@@ -1122,45 +1131,43 @@ char *HTTP_resmsg(HTTP_response *res, char *result)
         struct entry **es = MAP_entry_set(res->headers);
         int size = MAP_size(res->headers);
         for (int i = 0; i < size; i++) /* headers */
-            len += sprintf(result + len, "%s: %s\r\n", es[i]->key, es[i]->value);
+            len += sprintf(result + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
     }
     strcat(result + len, "\r\n");
     len += 2;
-    if (res->content != NULL) /* body */
+    if (!head && res->content != NULL) /* body */
         memcpy(result + len, res->content, res->content_length);
     return result;
 }
 
-long HTTP_send_response(HTTP_response *res, int fd)
+long HTTP_send_response(HTTP_response *res, int fd, char head)
 {
-    MAP *headers = MAP_new(1);
-    if (res->headers != NULL)
-        MAP_put_all(headers, res->headers);
-    MAP_put_if_absent(headers, "Connection", "close");
-    char date[29];
-    if (!MAP_contains_key(headers, "Date"))
-    { /* date */
+    MAP_put_if_absent(res->headers, "Connection", "close");
+    if (!MAP_contains_key(res->headers, "Date"))
+    { 
+        /* date */
+        char *date = malloc(29);
+        STACK_push(res->stack, date);
         time_t timer;
         time(&timer);
         struct tm t;
         gmtime_r(&timer, &t);
         HTTP_date_ex(&t, date);
-        MAP_put(headers, "Date", date);
+        MAP_put(res->headers, "Date", date);
     }
-    char content_length[numlenul(res->content_length)];
-    if (res->content != NULL && !MAP_contains_key(headers, "Content-Length"))
-    { /* content-length */
-        content_length[0] = '\0';
+    if (!MAP_contains_key(res->headers, "Content-Length") && res->code != 204)
+    {
+        /* content-length */
+        char *content_length = malloc(numlenul(res->content_length));
+        STACK_push(res->stack, content_length);
+        *content_length = '\0';
         sprintf(content_length, "%lu", res->content_length);
-        MAP_put(headers, "Content-Length", content_length);
+        MAP_put(res->headers, "Content-Length", content_length);
     }
-    MAP *temp = res->headers;
-    res->headers = headers;
-    long len = HTTP_ressize(res);
-    char msg[len];
-    HTTP_resmsg(res, msg);
-    res->headers = temp;
+    long len = HTTP_ressize(res, head);
+    char *msg = malloc(len);
+    HTTP_resmsg(res, msg, head);
     unsigned long written = send(fd, msg, len, MSG_NOSIGNAL);
-    MAP_free(headers);
+    free(msg);
     return written;
 }
