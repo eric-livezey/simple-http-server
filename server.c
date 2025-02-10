@@ -404,6 +404,7 @@ void handle_conn(int fd)
                         res.code = 204; /* No Content */
                     else
                         res.code = 405; /* Method Not Allowed */
+                    /* generate allow header */
                     ptr = generate_allow(handler);
                     STACK_push(res.stack, ptr);
                     MAP_put(res.headers, "Allow", ptr);
@@ -451,7 +452,7 @@ void handle_default(HTTP_request *req, HTTP_response *res)
             char *content_type = "*";
             int index = strlastindexof(req->target, '.');
             if (index >= 0)
-                /* infer content type */
+                /* infer content type from extension */
                 content_type = HTTP_content_type(req->target + index + 1);
             MAP_put(res->headers, "Content-Type", content_type);
             res->file = path;
@@ -488,9 +489,11 @@ void *thread_main(void *arg)
 
 char init(unsigned short port, int n)
 {
-    int sockfd, connfd, len, i, conns[n];
+    int sockfd, connfd, len, i;
     struct sockaddr_in server, client;
-    pthread_t threads[n];
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
     /* open socket */
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1)
@@ -517,7 +520,7 @@ char init(unsigned short port, int n)
         if ((listen(sockfd, n)) < 0)
             printf("listen failed\n");
         len = sizeof(client);
-        for (i = 0; i < n; i++)
+        while (1)
         {
             /* accept new connections */
             if ((connfd = accept(sockfd, (struct sockaddr *)&client, &len)) < 0)
@@ -525,16 +528,7 @@ char init(unsigned short port, int n)
                 printf("server accept failed\n");
                 continue;
             }
-            conns[i] = connfd;
-            pthread_attr_t attr;
-            pthread_attr_init(&attr);
-            pthread_create(&threads[i], &attr, &thread_main, &conns[i]);
-        }
-        for (i = 0; i < n; i++)
-        {
-            /* cleanup threads */
-            pthread_join(threads[i], NULL);
-            close(conns[i]);
+            pthread_create(&thread, &attr, &thread_main, &connfd);
         }
     }
     close(sockfd);
