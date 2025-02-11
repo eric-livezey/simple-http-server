@@ -1,4 +1,3 @@
-#include <unistd.h>
 #include "hashmap.h"
 
 #define MAX_LINE_SIZE 8 * (1 << 20)
@@ -81,6 +80,18 @@ char *HTTP_reason(unsigned short code);
 
 char *HTTP_content_type(char *ext);
 
+long HTTP_reqsize(HTTP_request *req);
+
+char *HTTP_reqmsg_ex(HTTP_request *req, char *buffer);
+
+long HTTP_ressize(HTTP_response *res, char head);
+
+char *HTTP_resmsg_ex(HTTP_response *res, char head, char *result);
+
+void HTTP_print_request(HTTP_request *req);
+
+void HTTP_print_response(HTTP_response *res);
+
 char *qstring(char *ptr, char **endptr);
 
 MAP *parse_query(char *ptr, char **endptr, MAP *result);
@@ -101,12 +112,8 @@ long recv_line(int fd, char **ptr);
 
 struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result);
 
-long HTTP_reqsize(HTTP_request *req);
-
-char *HTTP_reqmsg(HTTP_request *req, char *result);
-
-long HTTP_ressize(HTTP_response *res, char head);
-
-char *HTTP_resmsg(HTTP_response *res, char *result, char head);
-
 long HTTP_send_response(HTTP_response *res, int connfd, char head);
+
+void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd);
+
+HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result);

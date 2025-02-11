@@ -1,4 +1,3 @@
-#include <unistd.h>
 #include "hashmap.h"
 
 #define iswhitespace(c) (c == ' ' || c == '\t')
@@ -265,6 +264,152 @@ char *HTTP_content_type(char *ext)
         content_type_map = map;
     }
     return MAP_get_or_default(content_type_map, ext, "*");
+}
+
+long HTTP_reqsize(HTTP_request *req)
+{
+    char *date;
+    int i;
+    long len = 6;
+    len += strlen(req->method);
+    len += strlen(req->target);
+    if (req->query != NULL)
+    {
+        struct entry **es = MAP_entry_set(req->query);
+        int size = MAP_size(req->query);
+        for (i = 0; i < size; i++)
+        {
+            len += 2;
+            len += strlen(es[i]->key);
+            len += strlen(es[i]->value);
+        }
+    }
+    len += strlen(req->protocol);
+    if (req->headers != NULL)
+    {
+        struct entry **es = MAP_entry_set(req->headers);
+        int size = MAP_size(req->headers);
+        for (i = 0; i < size; i++)
+        {
+            len += 4;
+            len += strlen(es[i]->key);
+            len += strlen(es[i]->value);
+        }
+    }
+    if (req->content != NULL)
+        len += req->content_length;
+    return len;
+}
+
+char *HTTP_reqmsg_ex(HTTP_request *req, char *buffer)
+{
+    int i;
+    long len = 0;
+    /* write message */
+    *buffer = '\0';
+    len += sprintf(buffer, "%s %s", req->method, req->target);
+    if (req->query != NULL)
+    {
+        struct entry **es = MAP_entry_set(req->query);
+        int size = MAP_size(req->query);
+        for (i = 0; i < size; i++)
+        {
+            if (i == 0)
+                strcat(buffer + len, "?");
+            else
+                strcat(buffer + len, "&");
+            len += 1;
+            len += sprintf(buffer + len, "%s=%s", es[i]->key, (char *)es[i]->value);
+        }
+    }
+    len += sprintf(buffer + len, " %s\r\n", req->protocol);
+    if (req->headers != NULL)
+    {
+        struct entry **es = MAP_entry_set(req->headers);
+        int size = MAP_size(req->headers);
+        for (i = 0; i < size; i++) /* headers */
+            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
+    }
+    strcat(buffer + len, "\r\n");
+
+    len += 2;
+    if (req->content != NULL) /* body */
+        memcpy(buffer + len, req->content, req->content_length);
+    return buffer;
+}
+
+char *HTTP_reqmsg(HTTP_request *req)
+{
+    char *msg = malloc(HTTP_reqsize(req));
+    HTTP_reqmsg_ex(req, msg);
+    return msg;
+}
+
+unsigned long HTTP_ressize(HTTP_response *res, char head)
+{
+    char *date;
+    int i;
+    unsigned long len = 9;
+    len += strlen(res->protocol);
+    len += strlen(res->reason);
+    if (res->headers != NULL)
+    {
+        struct entry **es = MAP_entry_set(res->headers);
+        int size = MAP_size(res->headers);
+        for (i = 0; i < size; i++)
+        {
+            len += 4;
+            len += strlen(es[i]->key);
+            len += strlen(es[i]->value);
+        }
+    }
+    if (!head && res->content != NULL)
+        len += res->content_length;
+    return len;
+}
+
+char *HTTP_resmsg_ex(HTTP_response *res, char head, char *buffer)
+{
+    long len = 0;
+    /* write message */
+    *buffer = '\0';
+    len += sprintf(buffer, "%s %d %s\r\n", res->protocol, res->code, res->reason); /* protocol code reason */
+    if (res->headers != NULL)
+    {
+        struct entry **es = MAP_entry_set(res->headers);
+        int size = MAP_size(res->headers);
+        for (int i = 0; i < size; i++) /* headers */
+            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
+    }
+    strcat(buffer + len, "\r\n");
+    len += 2;
+    if (!head && res->content != NULL) /* body */
+        memcpy(buffer + len, res->content, res->content_length);
+    return buffer;
+}
+
+char *HTTP_resmsg(HTTP_response *res, char head)
+{
+    char *msg = malloc(HTTP_ressize(res, head));
+    HTTP_resmsg_ex(res, head, msg);
+    return msg;
+}
+
+void HTTP_print_request(HTTP_request *req)
+{
+    void *content = req->content;
+    req->content = NULL;
+    char *msg = HTTP_reqmsg(req);
+    printf("================ REQUEST  ================\r\n\r\n%s\r\n", msg);
+    free(msg);
+    req->content = content;
+}
+
+void HTTP_print_response(HTTP_response *res)
+{
+    char *msg = HTTP_resmsg(res, 1);
+    printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", msg); /* print response head */
+    free(msg);
 }
 
 /*
@@ -1025,149 +1170,220 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
     return result;
 }
 
-long HTTP_reqsize(HTTP_request *req)
-{
-    char *date;
-    int i;
-    long len = 6;
-    len += strlen(req->method);
-    len += strlen(req->target);
-    if (req->query != NULL)
-    {
-        struct entry **es = MAP_entry_set(req->query);
-        int size = MAP_size(req->query);
-        for (i = 0; i < size; i++)
-        {
-            len += 2;
-            len += strlen(es[i]->key);
-            len += strlen(es[i]->value);
-        }
-    }
-    len += strlen(req->protocol);
-    if (req->headers != NULL)
-    {
-        struct entry **es = MAP_entry_set(req->headers);
-        int size = MAP_size(req->headers);
-        for (i = 0; i < size; i++)
-        {
-            len += 4;
-            len += strlen(es[i]->key);
-            len += strlen(es[i]->value);
-        }
-    }
-    if (req->content != NULL)
-        len += req->content_length;
-    return len;
-}
-
-char *HTTP_reqmsg(HTTP_request *req, char *buffer)
-{
-    int i;
-    long len = 0;
-    /* write message */
-    buffer[0] = '\0';
-    len += sprintf(buffer, "%s %s", req->method, req->target);
-    if (req->query != NULL)
-    {
-        struct entry **es = MAP_entry_set(req->query);
-        int size = MAP_size(req->query);
-        for (i = 0; i < size; i++)
-        {
-            len += 1;
-            if (i == 0)
-                strcat(buffer + len, "?");
-            else
-                strcat(buffer + len, "&");
-            len += sprintf(buffer + len, "%s=%s", es[i]->key, (char *)es[i]->value);
-        }
-    }
-    len += sprintf(buffer + len, " %s\r\n", req->protocol);
-    if (req->headers != NULL)
-    {
-        struct entry **es = MAP_entry_set(req->headers);
-        int size = MAP_size(req->headers);
-        for (i = 0; i < size; i++) /* headers */
-            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
-    }
-    strcat(buffer + len, "\r\n");
-
-    len += 2;
-    if (req->content != NULL) /* body */
-        memcpy(buffer + len, req->content, req->content_length);
-    return buffer;
-}
-
-unsigned long HTTP_ressize(HTTP_response *res, char head)
-{
-    char *date;
-    int i;
-    unsigned long len = 9;
-    len += strlen(res->protocol);
-    len += strlen(res->reason);
-    if (res->headers != NULL)
-    {
-        struct entry **es = MAP_entry_set(res->headers);
-        int size = MAP_size(res->headers);
-        for (i = 0; i < size; i++)
-        {
-            len += 4;
-            len += strlen(es[i]->key);
-            len += strlen(es[i]->value);
-        }
-    }
-    if (!head && res->content != NULL)
-        len += res->content_length;
-    return len;
-}
-
-char *HTTP_resmsg(HTTP_response *res, char *result, char head)
-{
-    long len = 0;
-    /* write message */
-    result[0] = '\0';
-    len += sprintf(result, "%s %d %s\r\n", res->protocol, res->code, res->reason); /* protocol code reason */
-    if (res->headers != NULL)
-    {
-        struct entry **es = MAP_entry_set(res->headers);
-        int size = MAP_size(res->headers);
-        for (int i = 0; i < size; i++) /* headers */
-            len += sprintf(result + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
-    }
-    strcat(result + len, "\r\n");
-    len += 2;
-    if (!head && res->content != NULL) /* body */
-        memcpy(result + len, res->content, res->content_length);
-    return result;
-}
-
 long HTTP_send_response(HTTP_response *res, int fd, char head)
 {
     MAP_put_if_absent(res->headers, "Connection", "close");
     if (!MAP_contains_key(res->headers, "Date"))
-    { 
+    {
         /* date */
-        char *date = malloc(29);
-        STACK_push(res->stack, date);
         time_t timer;
         time(&timer);
         struct tm t;
         gmtime_r(&timer, &t);
-        HTTP_date_ex(&t, date);
+        char *date = HTTP_date(&t);
+        STACK_push(res->stack, date);
         MAP_put(res->headers, "Date", date);
     }
-    if (!MAP_contains_key(res->headers, "Content-Length") && res->code != 204)
+    if (res->code != 204)
     {
         /* content-length */
-        char *content_length = malloc(numlenul(res->content_length));
+        char *content_length = malloc(numlenul(res->content_length) + 1);
         STACK_push(res->stack, content_length);
         *content_length = '\0';
         sprintf(content_length, "%lu", res->content_length);
         MAP_put(res->headers, "Content-Length", content_length);
     }
     long len = HTTP_ressize(res, head);
-    char *msg = malloc(len);
-    HTTP_resmsg(res, msg, head);
+    char *msg = HTTP_resmsg(res, head);
     unsigned long written = send(fd, msg, len, MSG_NOSIGNAL);
     free(msg);
     return written;
+}
+
+void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd)
+{
+    MAP_put(res->headers, "Accept-Ranges", "bytes");
+    MAP_put_if_absent(res->headers, "Cache-Control", "no-cache");
+    FILE *fp = fopen(path, "r");
+    fseek(fp, 0L, SEEK_END);
+    unsigned long size = ftell(fp); /* file size */
+    char *rangeh = MAP_get(req->headers, "Range");
+    if (rangeh != NULL)
+    { /* range was specified */
+        unsigned long range[2];
+        parse_range(rangeh, size, range);
+        if (range == NULL || range[0] < 0 || range[0] >= size || range[1] < range[0])
+        {
+            res->code = 416; /* Range Not Satisfiable */
+            res->reason = HTTP_reason(res->code);
+            char *content_range = malloc(numlenul(size) + 9);
+            STACK_push(res->stack, content_range);
+            *content_range = '\0';
+            sprintf(content_range, "bytes */%ld", size);
+            MAP_put(res->headers, "Content-Range", content_range);
+            HTTP_send_response(res, fd, 0);
+        }
+        else
+        {
+            if (range[1] > size - 1) /* last pos is capped at size - 1 */
+                range[1] = size - 1;
+            res->code = 206; /* Partial Content */
+            res->reason = HTTP_reason(res->code);
+            /* content-range */
+            char *content_range = malloc(numlenul(range[0]) + numlenul(range[1]) + numlenul(size) + 9);
+            STACK_push(res->stack, content_range);
+            *content_range = '\0';
+            sprintf(content_range, "bytes %ld-%ld/%ld", range[0], range[1], size);
+            MAP_put(res->headers, "Content-Range", content_range);
+            /* size */
+            size = range[1] - range[0] + 1;
+            res->content_length = size;
+            HTTP_send_response(res, fd, 1);
+            if (strcmp(req->method, "HEAD") != 0)
+                /* body */
+                send_file(fd, fp, range[0], range[1]);
+        }
+    }
+    else
+    {
+
+        res->reason = HTTP_reason(res->code);
+        res->content_length = size;
+        HTTP_send_response(res, fd, 1);
+        /* body */
+        if (strcmp(req->method, "HEAD") != 0)
+            send_file(fd, fp, 0, size - 1);
+    }
+    fclose(fp);
+}
+
+HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
+{
+    char *data = NULL, *temp, *k, *v;
+    long i = 0, saven, ret;
+    struct entry e;
+    result->method = NULL;
+    result->target = NULL;
+    result->query = MAP_new(1);
+    result->protocol = NULL;
+    result->headers = MAP_new(1);
+    result->content = NULL;
+    result->content_length = 0;
+    result->trailers = MAP_new(1);
+    result->stack = STACK_new();
+    result->flags = 0;
+    ret = recv_line(fd, &data);
+    if (ret < 0)
+    {
+        if (ret == -1)
+            result->flags |= CONNECTION_ERROR;
+        if (ret == -2)
+            result->flags |= CONTENT_TOO_LARGE;
+        if (ret == -3)
+            result->flags |= CONNECTION_CLOSED;
+        return NULL;
+    }
+    STACK_push(result->stack, data);
+    if (HTTP_parse_reqln(data, result) == NULL)
+    {
+        result->flags |= PARSE_ERROR;
+        return NULL;
+    }
+    while (1)
+    {
+        ret = recv_line(fd, &data);
+        if (ret < 0)
+        {
+            if (ret == -1)
+                result->flags |= CONNECTION_ERROR;
+            if (ret == -2)
+                result->flags |= CONTENT_TOO_LARGE;
+            if (ret == -3)
+                result->flags |= CONNECTION_CLOSED;
+            return NULL;
+        }
+        STACK_push(result->stack, data);
+        if (ret == 0)
+            break;
+        /* field-lines */
+        if (HTTP_parse_fieldln(data, &e) == NULL)
+        {
+            result->flags |= PARSE_ERROR;
+            return NULL;
+        }
+        if ((k = MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
+        {
+            k = buffcat(k, strlen(k), ", ", 3);
+            e.key = buffcat(k, strlen(k), e.key, strlen(e.key) + 1);
+            free(k);
+            STACK_push(result->stack, e.key);
+        }
+        MAP_put(result->headers, e.key, e.value);
+    }
+    /* message body */
+    if ((v = MAP_get(result->headers, "Transfer-Encoding")) != NULL && *v != '\0')
+    {
+        int len = 1;
+        char *ptr = v;
+        while (*ptr != '\0')
+        {
+            if (*ptr == ',')
+                len++;
+            ptr++;
+        }
+        char *encodings[len];
+        int i = 0;
+        encodings[0] = v;
+        ptr = v;
+        while (*ptr != '\0')
+        {
+            if (*ptr == ',')
+            {
+                *ptr = '\0';
+                i++;
+                encodings[i] = ptr + 1;
+            }
+            ptr++;
+        }
+        for (i = 0; i < len; i++)
+            if (strcasecmp(encodings[i], "chunked") == 0)
+                recv_chunks(fd, result);
+    }
+    else if (MAP_contains_key(result->headers, "Content-Length"))
+    {
+        char *ptr, *endptr;
+        unsigned long content_length = strtoul(ptr = MAP_get(result->headers, "Content-Length"), &endptr, 10);
+        if (*ptr == '\0' || *endptr != '\0')
+        {
+            result->flags |= BAD_CONTENT_LENGTH;
+            return NULL;
+        }
+        if (content_length > 8UL * (1 << 30)) // 8 GB limit
+        {
+            /*
+             * NOTE: if we don't read the request to completion, the client will likely not receive the response
+             * but reading the whole request will take far too long with 8GB+ file sizes and thus waste resources
+             * so even though the request may be valid, we reject it immediately and close the connection.
+             */
+            result->flags |= CONTENT_TOO_LARGE;
+            return NULL;
+        }
+        result->content = malloc(content_length);
+        unsigned short size = 65535;
+        unsigned long bytes = 0;
+        while (bytes < content_length)
+        {
+            ret = recv(fd, result->content + bytes, bytes + size > content_length ? content_length - bytes : size, 0);
+            if (ret <= 0)
+            {
+                free(result->content);
+                result->flags |= CONNECTION_ERROR;
+                return NULL;
+            }
+            bytes += ret;
+        }
+        STACK_push(result->stack, result->content);
+        result->content_length = content_length;
+    }
+    return result;
 }
