@@ -112,6 +112,9 @@ void handle_conn(int fd)
             MAP_put(res.headers, "Connection", "close");
             persist = 0;
         }
+        else if (strcmp(req.protocol, "HTTP/1.0") != 0 && strcmp(req.protocol, "HTTP/1.1") != 0) {
+            res.code = 505; /* HTTP Version Not Supported */
+        }
         else
         {
             if (debug)

@@ -399,7 +399,10 @@ void HTTP_print_request(HTTP_request *req)
 {
     void *content = req->content;
     req->content = NULL;
-    char *msg = HTTP_reqmsg(req);
+    unsigned long size = HTTP_reqsize(req) + 1;
+    char *msg = malloc(size);
+    HTTP_reqmsg_ex(req, msg);
+    msg[size - 1] = '\0';
     printf("================ REQUEST  ================\r\n\r\n%s\r\n", msg);
     free(msg);
     req->content = content;
@@ -407,7 +410,10 @@ void HTTP_print_request(HTTP_request *req)
 
 void HTTP_print_response(HTTP_response *res)
 {
-    char *msg = HTTP_resmsg(res, 1);
+    unsigned long size = HTTP_ressize(res, 1) + 1;
+    char *msg = malloc(size);
+    HTTP_resmsg_ex(res, 1, msg);
+    msg[size - 1] = '\0';
     printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", msg); /* print response head */
     free(msg);
 }
@@ -1260,7 +1266,7 @@ void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd
 HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
 {
     char *data = NULL, *temp, *k, *v;
-    long i = 0, saven, ret;
+    long i = 0, ret;
     struct entry e;
     result->method = NULL;
     result->target = NULL;
