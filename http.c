@@ -1009,9 +1009,12 @@ long recv_line(int fd, char **ptr)
                 return -1;
             }
             // if we recieved 0 bytes
-            if (n == 0)
+            if (n == 0) {
+                if (data != NULL)
+                    free(data);
                 // return -3 indicating the connection was closed
                 return -3;
+            }
             // buffer position is 0
             buffer_pos = 0;
             // buffer size is the returned size
