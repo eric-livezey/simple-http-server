@@ -1199,9 +1199,10 @@ long HTTP_send_response(HTTP_response *res, int fd, char head)
         sprintf(content_length, "%lu", res->content_length);
         MAP_put(res->headers, "Content-Length", content_length);
     }
-    long len = HTTP_ressize(res, head);
-    char *msg = HTTP_resmsg(res, head);
-    unsigned long written = send(fd, msg, len, MSG_NOSIGNAL);
+    long size = HTTP_ressize(res, head);
+    char *msg = malloc(size);
+    HTTP_resmsg_ex(res, head, msg);
+    unsigned long written = send(fd, msg, size, MSG_NOSIGNAL);
     free(msg);
     return written;
 }
