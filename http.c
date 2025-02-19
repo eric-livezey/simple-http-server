@@ -330,8 +330,8 @@ char *HTTP_reqmsg_ex(HTTP_request *req, char *buffer)
         for (i = 0; i < size; i++) /* headers */
             len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
     }
-    strcat(buffer + len, "\r\n");
-
+    /* use memcpy so as not to put a terminating '\0' which might index out of the buffer */
+    memcpy(buffer + len, "\r\n", 2);
     len += 2;
     if (req->content != NULL) /* body */
         memcpy(buffer + len, req->content, req->content_length);
@@ -381,7 +381,8 @@ char *HTTP_resmsg_ex(HTTP_response *res, char head, char *buffer)
         for (int i = 0; i < size; i++) /* headers */
             len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
     }
-    strcat(buffer + len, "\r\n");
+    /* use memcpy so as not to put a terminating '\0' which might index out of the buffer */
+    memcpy(buffer + len, "\r\n", 2);
     len += 2;
     if (!head && res->content != NULL) /* body */
         memcpy(buffer + len, res->content, res->content_length);
