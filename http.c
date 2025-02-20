@@ -107,13 +107,13 @@ void HTTP_response_free(HTTP_response *res)
 char *HTTP_date_ex(struct tm *tm, char *result)
 {
     *result = '\0';
-    strftime(result, 30, "%a, %d %b %Y %T GMT", tm);
+    strftime(result, 29, "%a, %d %b %Y %T GMT", tm);
     return result;
 }
 
 char *HTTP_date(struct tm *tm)
 {
-    return HTTP_date_ex(tm, malloc(29 * sizeof(char)));
+    return HTTP_date_ex(tm, malloc(30 * sizeof(char)));
 }
 
 char *HTTP_reason(unsigned short code)
