@@ -984,6 +984,24 @@ __thread char buffer[65535];
 __thread unsigned short buffer_pos = 0;
 __thread unsigned short buffer_size = 0;
 
+ssize_t recv_r(int fd, void *buf, size_t n, int flags)
+{
+    unsigned long len = buffer_size - buffer_pos;
+    if (len >= n)
+    {
+        memcpy(buf, buffer + buffer_pos, n);
+        buffer_pos += n;
+        return n;
+    }
+    memcpy(buf, buffer + buffer_pos, len);
+    buffer_pos += len;
+    ssize_t ret = recv(fd, buf + len, n - len, flags);
+    if (ret < 0)
+        return ret;
+    else
+        return ret + len;
+}
+
 long recv_line(int fd, char **ptr)
 {
     char done = 0, *temp, *data = *ptr = NULL;
@@ -1010,7 +1028,8 @@ long recv_line(int fd, char **ptr)
                 return -1;
             }
             // if we recieved 0 bytes
-            if (n == 0) {
+            if (n == 0)
+            {
                 if (data != NULL)
                     free(data);
                 // return -3 indicating the connection was closed
@@ -1093,7 +1112,7 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
         bytes = 0;
         while (bytes < chunk.size)
         {
-            ret = recv(fd, chunk.content + bytes, bytes + size > chunk.size ? chunk.size - bytes : size, 0);
+            ret = recv_r(fd, chunk.content + bytes, bytes + size > chunk.size ? chunk.size - bytes : size, 0);
             if (ret <= 0)
             {
                 MAP_free(chunk.extension);
@@ -1384,7 +1403,7 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
         unsigned long bytes = 0;
         while (bytes < content_length)
         {
-            ret = recv(fd, result->content + bytes, bytes + size > content_length ? content_length - bytes : size, 0);
+            ret = recv_r(fd, result->content + bytes, bytes + size > content_length ? content_length - bytes : size, 0);
             if (ret <= 0)
             {
                 free(result->content);
