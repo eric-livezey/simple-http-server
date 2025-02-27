@@ -84,6 +84,31 @@ typedef struct HTTP_response
  * -----------------
  */
 
+void HTTP_request_init(HTTP_request *req) {
+    req->method = "GET";
+    req->target = "/";
+    req->query = MAP_new(1);
+    req->protocol = "HTTP/1.1";
+    req->headers = MAP_new(1);
+    req->content = NULL;
+    req->content_length = 0;
+    req->trailers = MAP_new(1);
+    req->stack = STACK_new();
+    req->flags = 0;
+}
+
+void HTTP_response_init(HTTP_response *res) {
+    res->protocol = "HTTP/1.1";
+    res->code = 200;
+    res->reason = "OK";
+    res->headers = MAP_new(1);
+    res->file = NULL;
+    res->content = NULL;
+    res->content_length = 0;
+    res->trailers = MAP_new(1);
+    res->stack = STACK_new();
+}
+
 void HTTP_request_free(HTTP_request *req)
 {
     if (req->query != NULL)
@@ -1242,7 +1267,7 @@ void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd
     { /* range was specified */
         unsigned long range[2];
         parse_range(rangeh, size, range);
-        if (range == NULL || range[0] < 0 || range[0] >= size || range[1] < range[0])
+        if (range == NULL || range[0] < 0 || range[0] >= size || range[0] > range[1])
         {
             res->code = 416; /* Range Not Satisfiable */
             res->reason = HTTP_reason(res->code);
@@ -1294,14 +1319,7 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
     struct entry e;
     result->method = NULL;
     result->target = NULL;
-    result->query = MAP_new(1);
     result->protocol = NULL;
-    result->headers = MAP_new(1);
-    result->content = NULL;
-    result->content_length = 0;
-    result->trailers = MAP_new(1);
-    result->stack = STACK_new();
-    result->flags = 0;
     ret = recv_line(fd, &data);
     if (ret < 0)
     {

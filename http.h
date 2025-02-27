@@ -66,7 +66,9 @@ typedef struct HTTP_response
     STACK *stack;
 } HTTP_response;
 
-unsigned long *parse_range(char *ptr, unsigned long size, unsigned long *result);
+void HTTP_request_init(HTTP_request *req);
+
+void HTTP_response_init(HTTP_response *res);
 
 int HTTP_request_free(HTTP_request *req);
 
@@ -94,9 +96,11 @@ void HTTP_print_response(HTTP_response *res);
 
 char *qstring(char *ptr, char **endptr);
 
-MAP *parse_query(char *ptr, char **endptr, MAP *result);
+unsigned long *parse_range(char *ptr, unsigned long size, unsigned long *result);
 
 struct content_type *parse_content_type(char *ptr, struct content_type *result);
+
+MAP *parse_query(char *ptr, char **endptr, MAP *result);
 
 struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result);
 

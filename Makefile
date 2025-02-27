@@ -7,4 +7,4 @@ build:
 	${CC} ${INPUT} -o ${OUTPUT}
 
 clean:
-	$(RM) -rf $(BASENAME) *.o
+	$(RM) -rf $(OUTPUT) *.o

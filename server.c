@@ -78,6 +78,32 @@ char *generate_allow(struct path_handler *handler)
     return result;
 }
 
+char *generate_content_type(struct content_type *ct)
+{
+    struct entry *entry;
+    int i;
+    unsigned long size = 2;
+    size += strlen(ct->type);
+    size += strlen(ct->subtype);
+    for (i = 0; i < MAP_size(ct->parameters); i++)
+    {
+        entry = MAP_entry_set(ct->parameters)[i];
+        size += 5;
+        size += strlen(entry->key);
+        size += strlen(entry->value);
+    }
+    char *result = malloc(size);
+    *result = '\0';
+    size = 0;
+    size += sprintf(result, "%s/%s", ct->type, ct->subtype);
+    for (i = 0; i < MAP_size(ct->parameters); i++)
+    {
+        entry = MAP_entry_set(ct->parameters)[i];
+        size += sprintf(result + size, "; %s=\"%s\"", entry->key, (char *)entry->value);
+    }
+    return result;
+}
+
 void handle_conn(int fd)
 {
     char persist = 1, *ptr;
@@ -86,15 +112,8 @@ void handle_conn(int fd)
     struct path_handler *handler;
     while (persist)
     {
-        res.protocol = "HTTP/1.1";
-        res.code = 200; /* OK */
-        res.reason = HTTP_reason(res.code);
-        res.headers = MAP_new(1);
-        res.file = NULL;
-        res.content = NULL;
-        res.content_length = 0;
-        res.trailers = MAP_new(1);
-        res.stack = STACK_new();
+        HTTP_request_init(&req);
+        HTTP_response_init(&res);
         /* read a request from the connection */
         if (HTTP_readreq_ex(fd, &req) == NULL)
         {
