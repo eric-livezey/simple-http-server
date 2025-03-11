@@ -238,7 +238,12 @@ void handle_default(HTTP_request *req, HTTP_response *res)
         }
         else
         {
-            res->code = 405; /* Method Not Allowed */
+            /* OPTIONS request or method with no handler */
+            if (strcmp(req->method, "OPTIONS") == 0)
+                res->code = 204; /* No Content */
+            else
+                res->code = 405; /* Method Not Allowed */
+            MAP_put(res->headers, "Allow", "GET, HEAD");
         }
     }
     else
