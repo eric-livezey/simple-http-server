@@ -84,28 +84,30 @@ typedef struct HTTP_response
  * -----------------
  */
 
-void HTTP_request_init(HTTP_request *req) {
+void HTTP_request_init(HTTP_request *req)
+{
     req->method = "GET";
     req->target = "/";
-    req->query = MAP_new(1);
+    req->query = MAP_new_ignore_case();
     req->protocol = "HTTP/1.1";
-    req->headers = MAP_new(1);
+    req->headers = MAP_new_ignore_case();
     req->content = NULL;
     req->content_length = 0;
-    req->trailers = MAP_new(1);
+    req->trailers = MAP_new_ignore_case();
     req->stack = STACK_new();
     req->flags = 0;
 }
 
-void HTTP_response_init(HTTP_response *res) {
+void HTTP_response_init(HTTP_response *res)
+{
     res->protocol = "HTTP/1.1";
     res->code = 200;
     res->reason = "OK";
-    res->headers = MAP_new(1);
+    res->headers = MAP_new_ignore_case();
     res->file = NULL;
     res->content = NULL;
     res->content_length = 0;
-    res->trailers = MAP_new(1);
+    res->trailers = MAP_new_ignore_case();
     res->stack = STACK_new();
 }
 
@@ -246,7 +248,7 @@ char *HTTP_content_type(char *ext)
     if (!content_type_map_initialized)
     {
         content_type_map_initialized = 1;
-        MAP *map = MAP_new(1);
+        MAP *map = MAP_new_ignore_case();
         // video/matroska
         MAP_put(map, "mkv", "video/matroska");
         // video/matroska-3d
@@ -600,12 +602,12 @@ MAP *parse_query(char *ptr, char **eptr, MAP *result)
     ptr++;
     while (1)
     {
-        // pchar
+        // pchar / "/" / "?"
         k = endptr = ptr;
-        while (*endptr != '=' && ispchar(endptr))
+        while (*endptr != '=' && (*endptr == '/' || *endptr == '?' || ispchar(endptr)))
             endptr++;
         ptr = endptr;
-        // '='
+        // "="
         if (*ptr != '=')
         {
             v = endptr;
@@ -614,13 +616,13 @@ MAP *parse_query(char *ptr, char **eptr, MAP *result)
         }
         *endptr = '\0';
         ptr++;
-        // pchar
+        // pchar / "/" / "?"
         v = endptr = ptr;
-        while (*endptr != '&' && ispchar(endptr))
+        while (*endptr != '&' && (*endptr == '/' || *endptr == '?' || ispchar(endptr)))
             endptr++;
         ptr = endptr;
         MAP_put(result, k, v);
-        // [ '&' ]
+        // [ "&" ]
         if (*ptr != '&')
             break;
         *endptr = '\0';
@@ -918,7 +920,7 @@ struct multipart *parse_multipart(char *content, unsigned long content_length, c
         return NULL;
     while (len > 4 || strncmp("--\r\n", ptr, 4) != 0)
     {
-        part.headers = MAP_new(1);
+        part.headers = MAP_new_ignore_case();
         // CRLF
         if (len >= 2 && iscrlf(ptr))
         {
@@ -1124,7 +1126,7 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
         return NULL;
     }
     STACK_push(result->stack, data);
-    chunk.extension = MAP_new(0);
+    chunk.extension = MAP_new();
     if (HTTP_parse_chunk_size(data, &chunk) == NULL)
     {
         MAP_free(chunk.extension);
@@ -1180,7 +1182,7 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
             return NULL;
         }
         STACK_push(result->stack, data);
-        chunk.extension = MAP_new(0);
+        chunk.extension = MAP_new();
         if (HTTP_parse_chunk_size(data, &chunk) == NULL)
         {
             MAP_free(chunk.extension);

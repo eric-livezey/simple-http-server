@@ -1,5 +1,10 @@
+#include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
+#include <ctype.h>
 #include "utils.h"
+
+// Adapted from the JDK java.util.HashMap class
 
 #define DEFAULT_INITIAL_CAPACITY (1 << 4)
 #define MAXIMUM_CAPACITY (1 << 30)
@@ -21,19 +26,18 @@ typedef struct node_s
 
 typedef struct hashmap_s
 {
-    struct entry **entryset;
-    char **keyset;
+    struct entry **entry_set;
+    char **key_set;
     void **values;
     struct node_s **table;
     int capacity;
     int size;
-    int modcount;
     int threshold;
-    float loadfactor;
-    char ignorecase;
+    float load_factor;
+    bool ignore_case;
 } MAP;
 
-int hash(char *s, char lower)
+int hash(char *s, bool lower)
 {
     int h = 0;
     for (int i = 0; s[i] != '\0'; i++)
@@ -58,44 +62,49 @@ NODE *NODE_new(int hash, char *key, void *value, NODE *next)
     return node;
 }
 
-MAP *MAP_new_r(char ignorecase, float loadfactor, int initialcapacity)
+MAP *MAP_new_r(float load_factor, int initial_capacity, bool ignore_case)
 {
     MAP *map = malloc(sizeof(MAP));
-    map->entryset = NULL;
-    map->keyset = NULL;
+    map->entry_set = NULL;
+    map->key_set = NULL;
     map->values = NULL;
     map->table = NULL;
     map->capacity = 0;
     map->size = 0;
-    map->modcount = 0;
-    map->loadfactor = loadfactor;
-    map->threshold = table_size_for(initialcapacity);
-    map->ignorecase = ignorecase;
+    map->load_factor = load_factor;
+    map->threshold = table_size_for(initial_capacity);
+    map->ignore_case = ignore_case;
     return map;
 }
 
-MAP *MAP_new(char ignorecase)
+MAP *MAP_new()
 {
-    return MAP_new_r(ignorecase, DEFAULT_LOAD_FACTOR, DEFAULT_INITIAL_CAPACITY);
+    return MAP_new_r(DEFAULT_LOAD_FACTOR, DEFAULT_INITIAL_CAPACITY, false);
 }
 
-int MAP_size(MAP *map) {
+MAP *MAP_new_ignore_case()
+{
+    return MAP_new_r(DEFAULT_LOAD_FACTOR, DEFAULT_INITIAL_CAPACITY, true);
+}
+
+int MAP_size(MAP *map)
+{
     return map->size;
 }
 
 void MAP_free_cache(MAP *map)
 {
-    if (map->entryset != NULL)
+    if (map->entry_set != NULL)
     {
         for (int i = 0; i < map->size; i++)
-            free(map->entryset[i]);
-        free(map->entryset);
-        map->entryset = NULL;
+            free(map->entry_set[i]);
+        free(map->entry_set);
+        map->entry_set = NULL;
     }
-    if (map->keyset != NULL)
+    if (map->key_set != NULL)
     {
-        free(map->keyset);
-        map->keyset = NULL;
+        free(map->key_set);
+        map->key_set = NULL;
     }
     if (map->values != NULL)
     {
@@ -107,7 +116,6 @@ void MAP_free_cache(MAP *map)
 void MAP_clear(MAP *map)
 {
     NODE **tab;
-    map->modcount++;
     if ((tab = map->table) != NULL && map->size > 0)
     {
         MAP_free_cache(map);
@@ -141,93 +149,93 @@ void MAP_free(MAP *map)
 
 NODE **MAP_resize(MAP *map)
 {
-    NODE **oldTab = map->table;
-    int oldCap = (oldTab == NULL) ? 0 : map->capacity;
-    int oldThr = map->threshold;
-    int newCap, newThr = 0;
-    if (oldCap > 0)
+    NODE **old_tab = map->table;
+    int old_cap = (old_tab == NULL) ? 0 : map->capacity;
+    int old_thr = map->threshold;
+    int new_cap, new_thr = 0;
+    if (old_cap > 0)
     {
-        if (oldCap >= MAXIMUM_CAPACITY)
+        if (old_cap >= MAXIMUM_CAPACITY)
         {
             map->threshold = __INT_MAX__;
-            return oldTab;
+            return old_tab;
         }
-        else if ((newCap = oldCap << 1) < MAXIMUM_CAPACITY && oldCap >= DEFAULT_INITIAL_CAPACITY)
-            newThr = oldThr << 1; // double threshold
+        else if ((new_cap = old_cap << 1) < MAXIMUM_CAPACITY && old_cap >= DEFAULT_INITIAL_CAPACITY)
+            new_thr = old_thr << 1; // double threshold
     }
-    else if (oldThr > 0) // initial capacity was placed in threshold
-        newCap = oldThr;
+    else if (old_thr > 0) // initial capacity was placed in threshold
+        new_cap = old_thr;
     else
     { // zero initial threshold signifies using defaults
-        newCap = DEFAULT_INITIAL_CAPACITY;
-        newThr = (int)(DEFAULT_LOAD_FACTOR * DEFAULT_INITIAL_CAPACITY);
+        new_cap = DEFAULT_INITIAL_CAPACITY;
+        new_thr = (int)(DEFAULT_LOAD_FACTOR * DEFAULT_INITIAL_CAPACITY);
     }
-    if (newThr == 0)
+    if (new_thr == 0)
     {
-        float ft = (float)newCap * map->loadfactor;
-        newThr = (newCap < MAXIMUM_CAPACITY && ft < (float)MAXIMUM_CAPACITY ? (int)ft : __INT_MAX__);
+        float ft = (float)new_cap * map->load_factor;
+        new_thr = (new_cap < MAXIMUM_CAPACITY && ft < (float)MAXIMUM_CAPACITY ? (int)ft : __INT_MAX__);
     }
-    map->threshold = newThr;
-    NODE **newTab = calloc(newCap, sizeof(NODE *));
-    map->table = newTab;
-    map->capacity = newCap;
-    if (oldTab != NULL)
+    map->threshold = new_thr;
+    NODE **new_tab = calloc(new_cap, sizeof(NODE *));
+    map->table = new_tab;
+    map->capacity = new_cap;
+    if (old_tab != NULL)
     {
-        for (int j = 0; j < oldCap; j++)
+        for (int j = 0; j < old_cap; j++)
         {
             NODE *e;
-            if ((e = oldTab[j]) != NULL)
+            if ((e = old_tab[j]) != NULL)
             {
-                oldTab[j] = NULL;
+                old_tab[j] = NULL;
                 if (e->next == NULL)
-                    newTab[e->hash & (newCap - 1)] = e;
+                    new_tab[e->hash & (new_cap - 1)] = e;
                 else
                 { // preserve order
-                    NODE *loHead = NULL, *loTail = NULL;
-                    NODE *hiHead = NULL, *hiTail = NULL;
+                    NODE *lo_head = NULL, *lo_tail = NULL;
+                    NODE *hi_head = NULL, *hi_tail = NULL;
                     NODE *next;
                     do
                     {
                         next = e->next;
-                        if ((e->hash & oldCap) == 0)
+                        if ((e->hash & old_cap) == 0)
                         {
-                            if (loTail == NULL)
-                                loHead = e;
+                            if (lo_tail == NULL)
+                                lo_head = e;
                             else
-                                loTail->next = e;
-                            loTail = e;
+                                lo_tail->next = e;
+                            lo_tail = e;
                         }
                         else
                         {
-                            if (hiTail == NULL)
-                                hiHead = e;
+                            if (hi_tail == NULL)
+                                hi_head = e;
                             else
-                                hiTail->next = e;
-                            hiTail = e;
+                                hi_tail->next = e;
+                            hi_tail = e;
                         }
                     } while ((e = next) != NULL);
-                    if (loTail != NULL)
+                    if (lo_tail != NULL)
                     {
-                        loTail->next = NULL;
-                        newTab[j] = loHead;
+                        lo_tail->next = NULL;
+                        new_tab[j] = lo_head;
                     }
-                    if (hiTail != NULL)
+                    if (hi_tail != NULL)
                     {
-                        hiTail->next = NULL;
-                        newTab[j + oldCap] = hiHead;
+                        hi_tail->next = NULL;
+                        new_tab[j + old_cap] = hi_head;
                     }
                 }
             }
         }
-        free(oldTab);
+        free(old_tab);
     }
-    return newTab;
+    return new_tab;
 }
 
 struct entry **MAP_entry_set(MAP *map)
 {
     struct entry **es;
-    if ((es = map->entryset) == NULL)
+    if ((es = map->entry_set) == NULL)
     {
         NODE **tab;
         int n;
@@ -244,7 +252,7 @@ struct entry **MAP_entry_set(MAP *map)
                     es[j]->value = e->value;
                 }
             }
-            map->entryset = es;
+            map->entry_set = es;
         }
     }
     return es;
@@ -253,7 +261,7 @@ struct entry **MAP_entry_set(MAP *map)
 char **MAP_key_set(MAP *map)
 {
     char **ks;
-    if ((ks = map->keyset) != NULL)
+    if ((ks = map->key_set) != NULL)
     {
         struct entry **es;
         if ((es = MAP_entry_set(map)) != NULL)
@@ -261,7 +269,7 @@ char **MAP_key_set(MAP *map)
             char **ks = malloc(map->size * sizeof(char *));
             for (int i = 0; i < map->size; i++)
                 ks[i] = es[i]->key;
-            map->keyset = ks;
+            map->key_set = ks;
         }
     }
     return ks;
@@ -281,7 +289,7 @@ void **MAP_values(MAP *map)
     return NULL;
 }
 
-void *MAP_put_val(MAP *map, int hash, char *key, void *value, char onlyIfAbsent, char evict)
+void *MAP_put_val(MAP *map, int hash, char *key, void *value, bool only_if_absent)
 {
     NODE **tab;
     int cap = 0;
@@ -300,31 +308,30 @@ void *MAP_put_val(MAP *map, int hash, char *key, void *value, char onlyIfAbsent,
     {
         NODE *e;
         char *k;
-        if (p->hash == hash && ((k = p->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
+        if (p->hash == hash && ((k = p->key) == key || (key != NULL && (map->ignore_case ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
             e = p;
         else
         {
-            for (int binCount = 0;; binCount++)
+            for (int bin_count = 0;; bin_count++)
             {
                 if ((e = p->next) == NULL)
                 {
                     p->next = NODE_new(hash, key, value, NULL);
                     break;
                 }
-                if (e->hash == hash && ((k = e->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
+                if (e->hash == hash && ((k = e->key) == key || (key != NULL && (map->ignore_case ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
                     break;
                 p = e;
             }
         }
         if (e != NULL)
         { // existing mapping for key
-            void *oldValue = e->value;
-            if (!onlyIfAbsent || oldValue == NULL)
+            void *old_value = e->value;
+            if (!only_if_absent || old_value == NULL)
                 e->value = value;
-            return oldValue;
+            return old_value;
         }
     }
-    map->modcount++;
     MAP_free_cache(map);
     if (map->size++ > map->threshold)
         MAP_resize(map);
@@ -333,17 +340,17 @@ void *MAP_put_val(MAP *map, int hash, char *key, void *value, char onlyIfAbsent,
 
 void *MAP_put(MAP *map, char *key, void *value)
 {
-    return MAP_put_val(map, hash(key, map->ignorecase), key, value, 0, 1);
+    return MAP_put_val(map, hash(key, map->ignore_case), key, value, false);
 }
 
-void MAP_put_map_entries(MAP *map, MAP *m, char evict)
+void MAP_put_map_entries(MAP *map, MAP *m)
 {
     int s = m->size;
     if (s > 0)
     {
         if (map->table == NULL)
         { // pre-size
-            float ft = ((float)s / map->loadfactor) + 1.0F;
+            float ft = ((float)s / map->load_factor) + 1.0F;
             int t = ((ft < (float)MAXIMUM_CAPACITY) ? (int)ft : MAXIMUM_CAPACITY);
             if (t > map->threshold)
                 map->threshold = table_size_for(t);
@@ -360,14 +367,14 @@ void MAP_put_map_entries(MAP *map, MAP *m, char evict)
         for (int i = 0; i < m->size; i++)
         {
             struct entry *e = es[i];
-            MAP_put_val(map, hash(e->key, map->ignorecase), e->key, e->value, 0, evict);
+            MAP_put_val(map, hash(e->key, map->ignore_case), e->key, e->value, false);
         }
     }
 }
 
 void MAP_put_all(MAP *map, MAP *m)
 {
-    MAP_put_map_entries(map, m, 1);
+    MAP_put_map_entries(map, m);
 }
 
 NODE *MAP_get_node(MAP *map, char *key)
@@ -376,15 +383,15 @@ NODE *MAP_get_node(MAP *map, char *key)
     NODE *first, *e;
     int n, h;
     char *k;
-    if ((tab = map->table) != NULL && (n = map->capacity) > 0 && (first = tab[(n - 1) & (h = hash(key, map->ignorecase))]) != NULL)
+    if ((tab = map->table) != NULL && (n = map->capacity) > 0 && (first = tab[(n - 1) & (h = hash(key, map->ignore_case))]) != NULL)
     {
-        if (first->hash == h && ((k = first->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
+        if (first->hash == h && ((k = first->key) == key || (key != NULL && (map->ignore_case ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
             return first;
         if ((e = first->next) != NULL)
         {
             do
             {
-                if (e->hash == h && ((k = e->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
+                if (e->hash == h && ((k = e->key) == key || (key != NULL && (map->ignore_case ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
                     return e;
             } while ((e = e->next) != NULL);
         }
@@ -398,7 +405,7 @@ void *MAP_get(MAP *map, char *key)
     return (e = MAP_get_node(map, key)) == NULL ? NULL : e->value;
 }
 
-NODE *MAP_remove_node(MAP *map, int hash, char *key, void *value, char matchValue, char movable)
+NODE *MAP_remove_node(MAP *map, int hash, char *key, void *value, bool match_value)
 {
     NODE **tab;
     NODE *p;
@@ -408,13 +415,13 @@ NODE *MAP_remove_node(MAP *map, int hash, char *key, void *value, char matchValu
         NODE *node = NULL, *e;
         char *k;
         void *v;
-        if (p->hash == hash && ((k = p->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
+        if (p->hash == hash && ((k = p->key) == key || (key != NULL && (map->ignore_case ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
             node = p;
         else if ((e = p->next) != NULL)
         {
             do
             {
-                if (e->hash == hash && ((k = e->key) == key || (key != NULL && (map->ignorecase ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
+                if (e->hash == hash && ((k = e->key) == key || (key != NULL && (map->ignore_case ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
                 {
                     node = e;
                     break;
@@ -422,7 +429,7 @@ NODE *MAP_remove_node(MAP *map, int hash, char *key, void *value, char matchValu
                 p = e;
             } while ((e = e->next) != NULL);
         }
-        if (node != NULL && (!matchValue || (v = node->value) == value || (value != NULL && strcmp(value, v) == 0)))
+        if (node != NULL && (!match_value || (v = node->value) == value || (value != NULL && strcmp(value, v) == 0)))
         {
             if (node == p)
             {
@@ -432,7 +439,6 @@ NODE *MAP_remove_node(MAP *map, int hash, char *key, void *value, char matchValu
             {
                 p->next = node->next;
             }
-            map->modcount++;
             MAP_free_cache(map);
             map->size--;
             return node;
@@ -444,7 +450,7 @@ NODE *MAP_remove_node(MAP *map, int hash, char *key, void *value, char matchValu
 void *MAP_remove(MAP *map, char *key)
 {
     NODE *e;
-    if ((e = MAP_remove_node(map, hash(key, map->ignorecase), key, NULL, 0, 1)) == NULL)
+    if ((e = MAP_remove_node(map, hash(key, map->ignore_case), key, NULL, false)) == NULL)
         return NULL;
     void *value = e->value;
     free(e);
@@ -468,15 +474,15 @@ int MAP_contains_value(MAP *map, void *value)
     return 0;
 }
 
-void *MAP_get_or_default(MAP *map, char *key, void *defaultValue)
+void *MAP_get_or_default(MAP *map, char *key, void *default_value)
 {
     NODE *e;
-    return (e = MAP_get_node(map, key)) == NULL ? defaultValue : e->value;
+    return (e = MAP_get_node(map, key)) == NULL ? default_value : e->value;
 }
 
 void *MAP_put_if_absent(MAP *map, char *key, void *value)
 {
-    return MAP_put_val(map, hash(key, map->ignorecase), key, value, 1, 1);
+    return MAP_put_val(map, hash(key, map->ignore_case), key, value, true);
 }
 
 void *MAP_replace(MAP *map, char *key, void *value)
@@ -484,9 +490,9 @@ void *MAP_replace(MAP *map, char *key, void *value)
     NODE *e;
     if ((e = MAP_get_node(map, key)) != NULL)
     {
-        void *oldValue = e->value;
+        void *old_value = e->value;
         e->value = value;
-        return oldValue;
+        return old_value;
     }
     return NULL;
 }

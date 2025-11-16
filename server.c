@@ -298,6 +298,7 @@ char init(unsigned short port, int n)
         printf("socket bind failed\n");
         return 0;
     }
+    printf("listening on port %d\n", port);
     while (1)
     {
         /* listen on socket */
