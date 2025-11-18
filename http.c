@@ -23,6 +23,14 @@ enum FLAGS
     CONNECTION_CLOSED = 0b00010000
 };
 
+struct uri
+{
+    char *protocol;
+    char *host;
+    char *path;
+    MAP *query;
+};
+
 struct part
 {
     MAP *headers;
@@ -54,8 +62,7 @@ struct chunk
 typedef struct HTTP_request
 {
     char *method;
-    char *target;
-    MAP *query;
+    struct uri *target;
     char *protocol;
     MAP *headers;
     char *content;
@@ -84,11 +91,75 @@ typedef struct HTTP_response
  * -----------------
  */
 
+struct uri *URI_init(struct uri *uri)
+{
+    uri->protocol = NULL;
+    uri->host = NULL;
+    uri->path = NULL;
+    uri->query = MAP_new_ignore_case();
+}
+
+int URI_size(struct uri *uri)
+{
+    int len = 0;
+    if (uri->protocol != NULL)
+        len += strlen(uri->protocol) + 3;
+    if (uri->host != NULL)
+        len += strlen(uri->host);
+    if (uri->path != NULL)
+        len += strlen(uri->path);
+    if (uri->query != NULL)
+    {
+        struct entry **es = MAP_entry_set(uri->query);
+        int size = MAP_size(uri->query);
+        for (int i = 0; i < size; i++)
+        {
+            len += 2;
+            len += strlen(es[i]->key);
+            len += strlen(es[i]->value);
+        }
+    }
+    return len;
+}
+
+int URI_tostr_ex(struct uri *uri, char *buffer)
+{
+    int len = 0;
+    *buffer = '\0';
+    if (uri->protocol != NULL)
+        len += sprintf(buffer + len, "%s://", uri->protocol);
+    if (uri->host != NULL)
+        len += sprintf(buffer + len, "%s", uri->host);
+    if (uri->path != NULL)
+        len += sprintf(buffer + len, "%s", uri->path);
+    if (uri->query != NULL)
+    {
+        struct entry **es = MAP_entry_set(uri->query);
+        int size = MAP_size(uri->query);
+        for (int i = 0; i < size; i++)
+        {
+            if (i == 0)
+                strcat(buffer + len, "?");
+            else
+                strcat(buffer + len, "&");
+            len += 1;
+            len += sprintf(buffer + len, "%s=%s", es[i]->key, (char *)es[i]->value);
+        }
+    }
+    return len;
+}
+
+char *URI_tostr(struct uri *uri)
+{
+    char *str = malloc(URI_size(uri));
+    URI_tostr_ex(uri, str);
+    return str;
+}
+
 void HTTP_request_init(HTTP_request *req)
 {
     req->method = "GET";
-    req->target = "/";
-    req->query = MAP_new_ignore_case();
+    req->target = malloc(sizeof(struct uri));
     req->protocol = "HTTP/1.1";
     req->headers = MAP_new_ignore_case();
     req->content = NULL;
@@ -96,6 +167,8 @@ void HTTP_request_init(HTTP_request *req)
     req->trailers = MAP_new_ignore_case();
     req->stack = STACK_new();
     req->flags = 0;
+    URI_init(req->target);
+    STACK_push(req->stack, req->target);
 }
 
 void HTTP_response_init(HTTP_response *res)
@@ -113,8 +186,8 @@ void HTTP_response_init(HTTP_response *res)
 
 void HTTP_request_free(HTTP_request *req)
 {
-    if (req->query != NULL)
-        MAP_free(req->query);
+    if (req->target != NULL && req->target->query != NULL)
+        MAP_free(req->target->query);
     if (req->headers != NULL)
         MAP_free(req->headers);
     if (req->trailers != NULL)
@@ -299,18 +372,7 @@ long HTTP_reqsize(HTTP_request *req)
     int i;
     long len = 6;
     len += strlen(req->method);
-    len += strlen(req->target);
-    if (req->query != NULL)
-    {
-        struct entry **es = MAP_entry_set(req->query);
-        int size = MAP_size(req->query);
-        for (i = 0; i < size; i++)
-        {
-            len += 2;
-            len += strlen(es[i]->key);
-            len += strlen(es[i]->value);
-        }
-    }
+    len += URI_size(req->target);
     len += strlen(req->protocol);
     if (req->headers != NULL)
     {
@@ -328,41 +390,31 @@ long HTTP_reqsize(HTTP_request *req)
     return len;
 }
 
-char *HTTP_reqmsg_ex(HTTP_request *req, char *buffer)
+int HTTP_reqmsg_ex(HTTP_request *req, char *buffer)
 {
     int i;
     long len = 0;
-    /* write message */
+    // write message
     *buffer = '\0';
-    len += sprintf(buffer, "%s %s", req->method, req->target);
-    if (req->query != NULL)
-    {
-        struct entry **es = MAP_entry_set(req->query);
-        int size = MAP_size(req->query);
-        for (i = 0; i < size; i++)
-        {
-            if (i == 0)
-                strcat(buffer + len, "?");
-            else
-                strcat(buffer + len, "&");
-            len += 1;
-            len += sprintf(buffer + len, "%s=%s", es[i]->key, (char *)es[i]->value);
-        }
-    }
+    len += sprintf(buffer + len, "%s ", req->method);
+    // target
+    len += URI_tostr_ex(req->target, buffer + len);
     len += sprintf(buffer + len, " %s\r\n", req->protocol);
     if (req->headers != NULL)
     {
+        // headers
         struct entry **es = MAP_entry_set(req->headers);
         int size = MAP_size(req->headers);
-        for (i = 0; i < size; i++) /* headers */
+        for (i = 0; i < size; i++)
             len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
     }
-    /* use memcpy so as not to put a terminating '\0' which might index out of the buffer */
+    // use memcpy so as not to put a terminating '\0' which might index out of the buffer
     memcpy(buffer + len, "\r\n", 2);
     len += 2;
-    if (req->content != NULL) /* body */
+    // body
+    if (req->content != NULL)
         memcpy(buffer + len, req->content, req->content_length);
-    return buffer;
+    return len;
 }
 
 char *HTTP_reqmsg(HTTP_request *req)
@@ -395,7 +447,7 @@ unsigned long HTTP_ressize(HTTP_response *res, char head)
     return len;
 }
 
-char *HTTP_resmsg_ex(HTTP_response *res, char head, char *buffer)
+int HTTP_resmsg_ex(HTTP_response *res, bool head, char *buffer)
 {
     long len = 0;
     /* write message */
@@ -413,10 +465,10 @@ char *HTTP_resmsg_ex(HTTP_response *res, char head, char *buffer)
     len += 2;
     if (!head && res->content != NULL) /* body */
         memcpy(buffer + len, res->content, res->content_length);
-    return buffer;
+    return len;
 }
 
-char *HTTP_resmsg(HTTP_response *res, char head)
+char *HTTP_resmsg(HTTP_response *res, bool head)
 {
     char *msg = malloc(HTTP_ressize(res, head));
     HTTP_resmsg_ex(res, head, msg);
@@ -452,7 +504,7 @@ void HTTP_print_response(HTTP_response *res)
  * -----------------
  */
 
-char *qstring(char *ptr, char **endptr)
+char *parse_qstring(char *ptr, char **endptr)
 {
     long offset = 0;
     if (*ptr != '"')
@@ -510,7 +562,7 @@ MAP *parse_parameters(char *ptr, MAP *result)
         if (*ptr == '"')
         {
             // quoted-string
-            if ((v = qstring(ptr, &endptr)) == NULL)
+            if ((v = parse_qstring(ptr, &endptr)) == NULL)
                 return NULL;
         }
         else
@@ -593,9 +645,9 @@ struct content_type *parse_content_type(char *ptr, struct content_type *result)
     return result;
 }
 
-MAP *parse_query(char *ptr, char **eptr, MAP *result)
+MAP *parse_query(char *ptr, char **endptr, MAP *result)
 {
-    char *endptr = ptr, *k, *v;
+    char *ep = ptr, *k, *v, c;
     // '?'
     if (*ptr != '?')
         return NULL;
@@ -603,38 +655,428 @@ MAP *parse_query(char *ptr, char **eptr, MAP *result)
     while (1)
     {
         // pchar / "/" / "?"
-        k = endptr = ptr;
-        while (*endptr != '=' && (*endptr == '/' || *endptr == '?' || ispchar(endptr)))
-            endptr++;
-        ptr = endptr;
+        k = ep = ptr;
+        while (*ep != '=' && (*ep == '/' || *ep == '?' || ispchar(ep)))
+            ep++;
+        ptr = ep;
         // "="
         if (*ptr != '=')
         {
-            v = endptr;
+            v = ep;
             MAP_put(result, k, v);
             break;
         }
-        *endptr = '\0';
+        *ep = '\0';
         ptr++;
         // pchar / "/" / "?"
-        v = endptr = ptr;
-        while (*endptr != '&' && (*endptr == '/' || *endptr == '?' || ispchar(endptr)))
-            endptr++;
-        ptr = endptr;
+        v = ep = ptr;
+        while (*ep != '&' && (*ep == '/' || *ep == '?' || ispchar(ep)))
+            ep++;
+        ptr = ep;
         MAP_put(result, k, v);
         // [ "&" ]
         if (*ptr != '&')
             break;
-        *endptr = '\0';
+        *ep = '\0';
         ptr++;
     }
-    *endptr = '\0';
+    // temporarily set the endptr to null do as not to url decode past the end of the last value
+    c = *ep;
+    *ep = '\0';
     for (int i = 0; i < MAP_size(result); i++)
     {
-        urldecode(MAP_entry_set(result)[i]->key, MAP_entry_set(result)[i]->key);
-        urldecode(MAP_entry_set(result)[i]->value, MAP_entry_set(result)[i]->value);
+        k = MAP_entry_set(result)[i]->key;
+        v = MAP_entry_set(result)[i]->value;
+        urldecode(k, k);
+        urldecode(v, v);
+    }
+    *ep = c;
+    *endptr = ep;
+    return result;
+}
+
+struct uri *parse_origin_form(char *ptr, char **endptr, struct uri *result)
+{
+    char *ep = ptr;
+    // 1*( "/" segment )
+    result->path = ep = ptr;
+    while (*ep == '/')
+    {
+        ep++;
+        while (ispchar(ep))
+            ep++;
+    }
+    if (ptr == ep)
+        return NULL;
+    *endptr = ptr = ep;
+    // [ "?" query ]
+    if (parse_query(ptr, endptr, result->query) == NULL)
+        MAP_clear(result->query);
+    else
+        *ep = '\0';
+    return result;
+}
+
+/// ```abnf
+/// *( "/" segment )
+/// ```
+char *parse_path_abempty(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // *( "/" segment )
+    while (*ep == '/')
+    {
+        ep++;
+        while (ispchar(ep))
+            ep++;
+    }
+    *endptr = ep;
+    return ptr;
+}
+/// ```abnf
+/// "/" [ segment-nz *( "/" segment ) ]
+/// ```
+char *parse_path_absolute(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // "/"
+    if (*ep != '/')
+        return NULL;
+    ep++;
+    // [ segment-nz *( "/" segment ) ]
+    if (ispchar(ep))
+    {
+        ep++;
+        while (ispchar(ep))
+            ep++;
+        // *( "/" segment )
+        if (parse_path_abempty(ep, &ep) == NULL)
+            return NULL;
+    }
+    *endptr = ep;
+    return ptr;
+}
+/// ```abnf
+/// segment-nz *( "/" segment )
+/// ```
+char *parse_path_rootless(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    if (!ispchar(ep))
+        return NULL;
+    ep++;
+    while (ispchar(ep))
+        ep++;
+    // *( "/" segment )
+    if (parse_path_abempty(ep, &ep) == NULL)
+        return NULL;
+    *endptr = ep;
+    return ptr;
+}
+
+/// ```abnf
+/// DIGIT / %x31-39 DIGIT / "1" 2DIGIT / "2" %x30-34 DIGIT / "25" %x30-35 ; Any number from 0-255
+/// ```
+char *parse_dec_octet(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // Parse the integer until it's 3 digits long
+    short n = 0;
+    while (n < 100 && isdigit(*ep))
+    {
+        n = n * 10 + (*ep - '0');
+        ep++;
+    }
+    if (n > 255)
+        // The number is greater than 255, so omit the last character
+        ep--;
+    if (ptr == ep)
+        // The string is empty, so return null
+        return NULL;
+    *endptr = ep;
+    return ptr;
+}
+/// ```abnf
+/// dec-octet "." dec-octet "." dec-octet "." dec-octet
+/// ```
+char *parse_ipv4_address(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // dec-octet
+    if (parse_dec_octet(ep, &ep) == NULL)
+    {
+        return NULL;
+    }
+    for (char i = 0; i < 3; i++)
+    {
+        // "."
+        if (*ep != '.')
+            return NULL;
+        ep++;
+        // dec-octet
+        if (parse_dec_octet(ep, &ep) == NULL)
+            return NULL;
+    }
+    *endptr = ep;
+    return ptr;
+}
+
+/// ```abnf
+///                              6( h16 ":" ) ls32
+/// /                       "::" 5( h16 ":" ) ls32
+/// / [               h16 ] "::" 4( h16 ":" ) ls32
+/// / [ *1( h16 ":" ) h16 ] "::" 3( h16 ":" ) ls32
+/// / [ *2( h16 ":" ) h16 ] "::" 2( h16 ":" ) ls32
+/// / [ *3( h16 ":" ) h16 ] "::"    h16 ":"   ls32
+/// / [ *4( h16 ":" ) h16 ] "::"              ls32
+/// / [ *5( h16 ":" ) h16 ] "::"              h16
+/// / [ *6( h16 ":" ) h16 ] "::"
+/// ```
+char *parse_ipv6_address(char *ptr, char **endptr)
+{
+    // The unusually long abnf is just to account for the short form
+    // :: is valid
+    // FFFF::FF is valid
+    // ::FFFF::FFFF is ambigous so invalid
+    // FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF is valid
+    // FF::FFFF:FFFF:FFFF:FFFF:255.255.255.255 is valid
+    // Essentially up to 8 segments with no more than one short form
+    // Then the last two segments can be an ipv4
+    char *ep = ptr, n = 0, len;
+    bool short_form = false, separated = true;
+    while (n < 8)
+    {
+        if (separated && (n == 6 || short_form && n < 6) && parse_ipv4_address(ep, &ep) != NULL)
+        {
+            // Pointer is a terminating IPv4 address, so count 2 segments and break
+            n += 2;
+            break;
+        }
+        else if (separated && isxdigit(*ep))
+        {
+            // Character is a hex digit, so parse up to 4 hex digits
+            separated = false;
+            len = 0;
+            while (isxdigit(*ep) && len < 4)
+            {
+                ep++;
+                len++;
+            }
+            n++;
+        }
+        else if (n == 0 && *ep == ':')
+        {
+            // Character is ":" and is the first character, so parse the short form
+            ep++;
+            if (*ep != ':')
+                return NULL;
+            ep++;
+            n++;
+            short_form = true;
+        }
+        else if (!separated && *ep == ':')
+        {
+            // Character is ":", so parse the separator or short form
+            separated = true;
+            ep++;
+            if (!short_form && *ep == ':')
+            {
+                // Next character is ":" and no short form has been parsed, so parse the short form
+                ep++;
+                n++;
+                short_form = true;
+            }
+        }
+        else
+        {
+            // Pointer is not a valid token, so break
+            break;
+        }
+    }
+    if (n != 8 && (!short_form || n > 8))
+        // There must be either 8 segments or the short form and less than 8 segments, so return null
+        return NULL;
+    *endptr = ep;
+    return ptr;
+}
+
+// ```abnf
+// "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
+// ```
+char *parse_ipvfuture(char *ptr, char **endptr)
+{
+    char *ep = ptr, len;
+    // "v"
+    if (*ep != 'v')
+        return NULL;
+    ep++;
+    // 1*HEXDIG
+    len = 0;
+    while (isxdigit(*ep))
+    {
+        ep++;
+        len++;
+    }
+    if (len < 1)
+        return NULL;
+    // "."
+    if (*ep != '.')
+        return NULL;
+    ep++;
+    // 1*( unreserved / sub-delims / ":" )
+    len = 0;
+    while (isunreserved(*ep) || issubdelim(*ep) || *ep == ':')
+    {
+        ep++;
+        len++;
+    }
+    if (len < 1)
+        return NULL;
+    *endptr = ep;
+    return ptr;
+}
+/// ```abnf
+/// "[" ( IPv6address / IPvFuture ) "]"
+/// ```
+char *parse_ip_literal(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // "["
+    if (*ep != '[')
+        return NULL;
+    ep++;
+    // ( IPv6address / IPvFuture )
+    if (parse_ipv6_address(ep, &ep) == NULL && parse_ipvfuture(ep, &ep) == NULL)
+        return NULL;
+    // "]"
+    if (*ep != ']')
+        return NULL;
+    ep++;
+    *endptr = ep;
+    return ptr;
+}
+
+/// ```abnf
+/// [ userinfo "@" ] host [ ":" port ]
+/// ```
+char *parse_authority(char *ptr, char **endptr)
+{
+    // TODO: If the first part ends with a semicolon, then the semicolon might refer to the port
+    // If the first part contains a semicolon that is not at the end, then it must be user info
+    // If the first part is proceeded by an "@" then is must be user info
+    char *ep = ptr;
+    // *( unreserved / pct-encoded / sub-delims / ":" )
+    while (isunreserved(*ep) || ispctenc(ep) || issubdelim(*ep) || *ep == ':')
+        ep++;
+    // "@"
+    if (*ep == '@')
+        ep++;
+    else
+        ep = ptr;
+    // IP-literal / IPv4address / reg-name
+    if (parse_ip_literal(ep, &ep) == NULL && parse_ipv4_address(ep, &ep) == NULL)
+    {
+        // *( unreserved / pct-encoded / sub-delims )
+        while (isunreserved(*ep) || ispctenc(ep) || issubdelim(*ep))
+            ep++;
+    }
+    // ":" port
+    if (*ep == ':')
+    {
+        ep++;
+        // *DIGIT
+        while (isdigit(*ep))
+            ep++;
+    }
+    *endptr = ep;
+    return ptr;
+}
+/// ```abnf
+/// scheme ":" hier-part [ "?" query ]
+/// ```
+struct uri *parse_absolute_form(char *ptr, char **endptr, struct uri *result, STACK *stack)
+{
+    char *ep = ptr;
+    result->protocol = ep = ptr;
+    // ALPHA
+    if (!isalpha(*ep))
+        return NULL;
+    ep++;
+    // *( ALPHA / DIGIT / "+" / "-" / "." )
+    while (isalnum(*ep) || *ep == '+' || *ep == '-' || *ep == '.')
+        ep++;
+    ptr = ep;
+    // ":"
+    if (*ptr != ':')
+        return NULL;
+    ptr++;
+    *ep = '\0';
+    ep = ptr;
+    // "//" authority path-abempty / path-absolute / path-rootless / path-empty
+    if (strncmp(ep, "//", 2) != 0 || (result->host = parse_authority(ep + 2, &ep)) == NULL || (result->path = parse_path_abempty(ep, &ep)) == NULL)
+    {
+        ep = ptr;
+        if ((result->path = parse_path_absolute(ep, &ep)) == NULL)
+            result->path = parse_path_rootless(ep, &ep);
+    }
+    if (result->host != NULL)
+    {
+        unsigned char len = ep - result->path;
+        char *path = malloc(len + 1);
+        STACK_push(stack, path);
+        strncpy(path, result->path, len);
+        *(result->path) = '\0';
+        result->path = path;
+    }
+    *endptr = ptr = ep;
+    // [ "?" query ]
+    if (parse_query(ptr, endptr, result->query) == NULL)
+        MAP_clear(result->query);
+    else
+        *ep = '\0';
+    return result;
+}
+/// ```abnf
+/// (IP-literal / IPv4address / reg-name) ":" *DIGIT
+/// ```
+struct uri *parse_authority_form(char *ptr, char **eptr, struct uri *result)
+{
+    char *endptr = ptr;
+    result->host = ptr;
+    // IP-literal / IPv4address / reg-name
+    if (parse_ip_literal(endptr, &endptr) == NULL && parse_ipv4_address(endptr, &endptr) == NULL)
+    {
+        // *( unreserved / pct-encoded / sub-delims )
+        while (isunreserved(*endptr) || ispctenc(endptr) || issubdelim(*endptr))
+            endptr++;
+    }
+    // ":" port
+    if (*endptr == ':')
+    {
+        endptr++;
+        // *DIGIT
+        while (isdigit(*endptr))
+            endptr++;
     }
     *eptr = endptr;
+    return result;
+}
+
+struct uri *HTTP_parse_target(char *ptr, char **endptr, struct uri *result, STACK *stack)
+{
+    if (parse_origin_form(ptr, endptr, result) == NULL && parse_absolute_form(ptr, endptr, result, stack) == NULL && parse_authority_form(ptr, endptr, result) == NULL)
+    {
+        if (*ptr = '*')
+        {
+            if (*endptr != NULL)
+                *endptr = ptr + 1;
+            **endptr = '\0';
+        }
+        else
+        {
+            return NULL;
+        }
+    }
     return result;
 }
 
@@ -654,10 +1096,8 @@ struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result)
     ptr++;
     *endptr = '\0';
     // request-target
-    // TODO: better validation
-    result->target = endptr = ptr;
-    while (*endptr != ' ' && !iscrlf(endptr))
-        endptr++;
+    if (HTTP_parse_target(ptr, &endptr, result->target, result->stack) == NULL)
+        return NULL;
     ptr = endptr;
     // SP
     if (*ptr != ' ')
@@ -689,19 +1129,6 @@ struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result)
     if (!iscrlf(endptr))
         return NULL;
     *endptr = '\0';
-    ptr = result->target;
-    while (*ptr != '\0')
-        if (*ptr == '?')
-            if (parse_query(ptr, &endptr, result->query) != NULL)
-                break;
-            else
-                return NULL;
-        else
-            ptr++;
-    *ptr = '\0';
-    if (*endptr != '\0')
-        return NULL;
-    urldecode(result->target, result->target);
     return result;
 }
 
@@ -875,7 +1302,7 @@ struct chunk *HTTP_parse_chunk_size(char *ptr, struct chunk *result)
         if (*ptr == '"')
         {
             // quoted-string
-            if ((v = qstring(ptr, &endptr)) == NULL)
+            if ((v = parse_qstring(ptr, &endptr)) == NULL)
                 return NULL;
         }
         else
@@ -1320,7 +1747,6 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
     long i = 0, ret;
     struct entry e;
     result->method = NULL;
-    result->target = NULL;
     result->protocol = NULL;
     ret = recv_line(fd, &data);
     if (ret < 0)
@@ -1437,3 +1863,44 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
     }
     return result;
 }
+//
+// int main(int argc, char **argv)
+// {
+//     struct uri uri;
+//     char *endptr;
+//     char *str = malloc(100);
+//     strcpy(str, "https://admin:awww@.google.com:8000/watch?uri=https://www.youtube.com?v=1%26b=");
+//     printf("%s\n", str);
+//     struct uri *result = HTTP_parse_target(str, &endptr, &uri, STACK_new());
+//     if (result != NULL)
+//     {
+//         int len = endptr - str;
+//         char buf[len + 1];
+//         memset(buf, ' ', len);
+//         buf[len] = '\0';
+//         printf("%s^\n", buf);
+//         printf("protocol=%s\nhost=%s\npath=%s\nquery=", uri.protocol, uri.host, uri.path);
+//         if (MAP_size(uri.query) > 0)
+//         {
+//             printf("{ ");
+//             for (int i = 0; i < MAP_size(uri.query); i++)
+//             {
+//                 if (i > 0)
+//                 {
+//                     printf(", ");
+//                 }
+//                 printf("\"%s\"=\"%s\"", MAP_entry_set(uri.query)[i]->key, (char *)MAP_entry_set(uri.query)[i]->value);
+//             }
+//             printf(" }");
+//         }
+//         else
+//         {
+//             printf("{}");
+//         }
+//         printf("\n");
+//     }
+//     else
+//     {
+//         printf("bad URI");
+//     }
+// }

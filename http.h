@@ -11,6 +11,14 @@ enum FLAGS
     CONNECTION_CLOSED = 0b00010000
 };
 
+struct uri
+{
+    char *protocol;
+    char *host;
+    char *path;
+    MAP *query;
+};
+
 struct part
 {
     MAP *headers;
@@ -42,8 +50,7 @@ struct chunk
 typedef struct HTTP_request
 {
     char *method;
-    char *target;
-    MAP *query;
+    struct uri *target;
     char *protocol;
     MAP *headers;
     char *content;
@@ -94,7 +101,7 @@ void HTTP_print_request(HTTP_request *req);
 
 void HTTP_print_response(HTTP_response *res);
 
-char *qstring(char *ptr, char **endptr);
+char *parse_qstring(char *ptr, char **endptr);
 
 unsigned long *parse_range(char *ptr, unsigned long size, unsigned long *result);
 

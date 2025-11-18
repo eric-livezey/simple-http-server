@@ -153,7 +153,7 @@ void handle_conn(int fd)
             {
                 res.code = 501; /* Not Implemented */
             }
-            else if ((handler = (struct path_handler *)MAP_get(handlers, req.target)) != NULL)
+            else if ((handler = (struct path_handler *)MAP_get(handlers, req.target->path)) != NULL)
             {
                 /* call handler based on request method */
                 if ((strcmp(req.method, "GET") == 0 || strcmp(req.method, "HEAD") == 0) && handler->get != NULL)
@@ -217,22 +217,22 @@ void handle_conn(int fd)
 void handle_default(HTTP_request *req, HTTP_response *res)
 {
     struct stat path_stat;
-    char *path = malloc(strlen(req->target) + 2);
+    char *path = malloc(strlen(req->target->path) + 2);
     STACK_push(res->stack, path);
     *path = '.';
-    strcpy(path + 1, req->target);
+    strcpy(path + 1, req->target->path);
     if (access(path, F_OK) == 0 && stat(path, &path_stat) == 0 && S_ISREG(path_stat.st_mode))
     {
         if (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)
         {
             /* assets are assumed to be immutable */
-            if (strncmp(req->target, "/assets/", 8) == 0)
+            if (strncmp(req->target->path, "/assets/", 8) == 0)
                 MAP_put(res->headers, "Cache-Control", "max-age=31536000");
             char *content_type = "*";
-            int index = strlastindexof(req->target, '.');
+            int index = strlastindexof(req->target->path, '.');
             if (index >= 0)
                 /* infer content type from extension */
-                content_type = HTTP_content_type(req->target + index + 1);
+                content_type = HTTP_content_type(req->target->path + index + 1);
             MAP_put(res->headers, "Content-Type", content_type);
             res->file = path;
         }
