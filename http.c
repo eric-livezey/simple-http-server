@@ -961,9 +961,6 @@ char *parse_ip_literal(char *ptr, char **endptr)
 /// ```
 char *parse_authority(char *ptr, char **endptr)
 {
-    // TODO: If the first part ends with a semicolon, then the semicolon might refer to the port
-    // If the first part contains a semicolon that is not at the end, then it must be user info
-    // If the first part is proceeded by an "@" then is must be user info
     char *ep = ptr;
     // *( unreserved / pct-encoded / sub-delims / ":" )
     while (isunreserved(*ep) || ispctenc(ep) || issubdelim(*ep) || *ep == ':')
