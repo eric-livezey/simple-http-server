@@ -1,7 +1,3 @@
-#include <stdlib.h>
-#include <stdbool.h>
-#include <string.h>
-#include <ctype.h>
 #include "utils.h"
 
 #define DEFAULT_INITIAL_CAPACITY (1 << 4)

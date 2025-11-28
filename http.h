@@ -1,4 +1,5 @@
 #include "hashmap.h"
+#include "uri.h"
 
 #define MAX_LINE_SIZE 8 * (1 << 20)
 
@@ -11,29 +12,21 @@ enum FLAGS
     CONNECTION_CLOSED = 0b00010000
 };
 
-struct uri
-{
-    char *protocol;
-    char *host;
-    char *path;
-    MAP *query;
-};
-
 struct part
 {
     MAP *headers;
-    unsigned long content_length;
+    uint64_t content_length;
     char *content;
 };
 
 struct multipart
 {
-    struct part *parts;
-    unsigned long length;
+    struct part **parts;
+    int32_t length;
     STACK *stack;
 };
 
-struct content_type
+struct media_type
 {
     char *type;
     char *subtype;
@@ -42,89 +35,109 @@ struct content_type
 
 struct chunk
 {
-    unsigned long size;
+    uint64_t size;
     char *content;
     MAP *extension;
 };
 
-typedef struct HTTP_request
+struct int_range
+{
+    uint64_t first;
+    uint64_t last;
+};
+
+struct range
+{
+    char *units;
+    char **set;
+    int length;
+    STACK *stack;
+};
+
+struct http_request
 {
     char *method;
     struct uri *target;
-    char *protocol;
+    char *version;
     MAP *headers;
     char *content;
-    unsigned long content_length;
+    uint64_t content_length;
     MAP *trailers;
     STACK *stack;
     short flags;
-} HTTP_request;
+};
 
-typedef struct HTTP_response
+struct http_response
 {
-    char *protocol;
+    char *version;
     short code;
     char *reason;
     MAP *headers;
     char *file;
     char *content;
-    unsigned long content_length;
+    uint64_t content_length;
     MAP *trailers;
     STACK *stack;
-} HTTP_response;
+};
 
-void HTTP_request_init(HTTP_request *req);
+void HTTP_request_init(struct http_request *req);
 
-void HTTP_response_init(HTTP_response *res);
+void HTTP_response_init(struct http_response *res);
 
-int HTTP_request_free(HTTP_request *req);
+void HTTP_request_free(struct http_request *req);
 
-int HTTP_response_free(HTTP_response *res);
+void HTTP_response_free(struct http_response *res);
 
 char *HTTP_date_ex(struct tm *tm, char *result);
 
 char *HTTP_date(struct tm *tm);
 
-char *HTTP_reason(unsigned short code);
+char *HTTP_reason(uint16_t code);
 
 char *HTTP_content_type(char *ext);
 
-long HTTP_reqsize(HTTP_request *req);
+uint64_t HTTP_reqsize(struct http_request *req, bool head);
 
-char *HTTP_reqmsg_ex(HTTP_request *req, char *buffer);
+uint64_t HTTP_push_request(BUFFER *b, struct http_request *req, bool head);
 
-long HTTP_ressize(HTTP_response *res, char head);
+uint64_t HTTP_reqmsg_ex(struct http_request *req, bool head, uint8_t **result);
 
-char *HTTP_resmsg_ex(HTTP_response *res, char head, char *result);
+uint8_t *HTTP_reqmsg(struct http_request *req, bool head);
 
-void HTTP_print_request(HTTP_request *req);
+void HTTP_print_request(struct http_request *req);
 
-void HTTP_print_response(HTTP_response *res);
+uint64_t HTTP_ressize(struct http_response *req, bool head);
 
-char *parse_qstring(char *ptr, char **endptr);
+uint64_t HTTP_push_response(BUFFER *b, struct http_response *res, bool head);
 
-unsigned long *parse_range(char *ptr, unsigned long size, unsigned long *result);
+uint64_t HTTP_resmsg_ex(struct http_response *res, bool head, uint8_t **result);
 
-struct content_type *parse_content_type(char *ptr, struct content_type *result);
+uint8_t *HTTP_resmsg(struct http_response *res, bool head);
 
-MAP *parse_query(char *ptr, char **endptr, MAP *result);
+void HTTP_print_response(struct http_response *res);
 
-struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result);
+int parse_qstring(char *ptr, char **endptr, char **s);
 
-struct HTTP_response *HTTP_parse_statusln(char *ptr, struct HTTP_response *result);
+int HTTP_parse_range(char *ptr, char **endptr, struct range *r);
 
-struct entry *HTTP_parse_fieldln(char *ptr, struct entry *result);
+int HTTP_parse_media_type(char *ptr, char **endptr, struct media_type *result);
 
-struct chunk *HTTP_parse_chunk_size(char *ptr, struct chunk *result);
+int HTTP_parse_request_line(char *ptr, char **endptr, struct http_request *req);
 
-struct multipart *parse_multipart(char *content, unsigned long content_length, char *boundary, struct multipart *result);
+int HTTP_parse_status_line(char *ptr, char **endptr, struct http_response *res);
 
-long recv_line(int fd, char **ptr);
+int HTTP_parse_field_line(char *ptr, char **endptr, struct entry *result);
 
-struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result);
+int HTTP_parse_chunk_head(char *ptr, char **endptr, struct chunk *result);
 
-long HTTP_send_response(HTTP_response *res, int connfd, char head);
+bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipart *mp);
 
-void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd);
+long recvln(int fd, char **ptr);
 
-HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result);
+struct http_request *HTTP_recv_chunks(int fd, struct http_request *result);
+
+long HTTP_send_response(struct http_response *res, int fd, bool head);
+
+void HTTP_respond_file(struct http_request *req, char *path, struct http_response *res, int fd);
+
+struct http_request *HTTP_recvreq(int fd, struct http_request *result);

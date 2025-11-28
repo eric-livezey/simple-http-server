@@ -1,13 +1,18 @@
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <netinet/in.h>
 #include "http.h"
 #define PORT 8000
 
-char debug = 0;
+bool debug = false;
 
-typedef void(request_handler)(HTTP_request *, HTTP_response *);
+typedef void(request_handler)(struct http_request *, struct http_response *);
 
 struct path_handler
 {
@@ -78,7 +83,7 @@ char *generate_allow(struct path_handler *handler)
     return result;
 }
 
-char *generate_content_type(struct content_type *ct)
+char *generate_content_type(struct media_type *ct)
 {
     struct entry *entry;
     int i;
@@ -107,15 +112,15 @@ char *generate_content_type(struct content_type *ct)
 void handle_conn(int fd)
 {
     char persist = 1, *ptr;
-    HTTP_request req;
-    HTTP_response res;
+    struct http_request req;
+    struct http_response res;
     struct path_handler *handler;
     while (persist)
     {
         HTTP_request_init(&req);
         HTTP_response_init(&res);
         /* read a request from the connection */
-        if (HTTP_readreq_ex(fd, &req) == NULL)
+        if (HTTP_recvreq(fd, &req) == NULL)
         {
             if ((req.flags & (CONNECTION_CLOSED | CONNECTION_ERROR)) != 0)
             {
@@ -131,7 +136,7 @@ void handle_conn(int fd)
             MAP_put(res.headers, "Connection", "close");
             persist = 0;
         }
-        else if (strcmp(req.protocol, "HTTP/1.0") != 0 && strcmp(req.protocol, "HTTP/1.1") != 0)
+        else if (strcmp(req.version, "HTTP/1.0") != 0 && strcmp(req.version, "HTTP/1.1") != 0)
         {
             res.code = 505; /* HTTP Version Not Supported */
         }
@@ -140,7 +145,7 @@ void handle_conn(int fd)
             if (debug)
                 HTTP_print_request(&req);
             ptr = MAP_get(req.headers, "Connection");
-            if (ptr != NULL && strcmp(ptr, "close") == 0 || strcmp(req.protocol, "HTTP/1.0") == 0 && (ptr == NULL || strcmp(ptr, "keep-alive") != 0))
+            if (ptr != NULL && strcmp(ptr, "close") == 0 || strcmp(req.version, "HTTP/1.0") == 0 && (ptr == NULL || strcmp(ptr, "keep-alive") != 0))
             {
                 MAP_put(res.headers, "Connection", "close");
                 persist = 0;
@@ -152,6 +157,10 @@ void handle_conn(int fd)
             if (strcmp(req.method, "CONNECT") == 0 || strcmp(req.method, "TRACE") == 0)
             {
                 res.code = 501; /* Not Implemented */
+            }
+            else if (req.target->path == NULL)
+            {
+                res.code = 404; // Not Found
             }
             else if ((handler = (struct path_handler *)MAP_get(handlers, req.target->path)) != NULL)
             {
@@ -204,7 +213,7 @@ void handle_conn(int fd)
         if (res.file != NULL)
             HTTP_respond_file(&req, res.file, &res, fd);
         else
-            HTTP_send_response(&res, fd, strcmp(req.method, "HEAD") == 0);
+            HTTP_send_response(&res, fd, req.method != NULL && strcmp(req.method, "HEAD") == 0);
         if (debug)
             HTTP_print_response(&res);
         /* free data */
@@ -214,7 +223,7 @@ void handle_conn(int fd)
     close(fd);
 }
 
-void handle_default(HTTP_request *req, HTTP_response *res)
+void handle_default(struct http_request *req, struct http_response *res)
 {
     struct stat path_stat;
     char *path = malloc(strlen(req->target->path) + 2);
@@ -252,13 +261,13 @@ void handle_default(HTTP_request *req, HTTP_response *res)
     }
 }
 
-void handle_index_get(HTTP_request *req, HTTP_response *res)
+void handle_index_get(struct http_request *req, struct http_response *res)
 {
     MAP_put(res->headers, "Content-Type", "text/html");
     res->file = "./index.html";
 }
 
-void handle_favicon_get(HTTP_request *req, HTTP_response *res)
+void handle_favicon_get(struct http_request *req, struct http_response *res)
 {
     MAP_put(res->headers, "Cache-Control", "max-age=31536000");
     MAP_put(res->headers, "Content-Type", "image/svg+xml");
@@ -334,7 +343,7 @@ int main(int argc, char **argv)
         {
             if (strcmp(ptr, "--debug") == 0)
             {
-                debug = 1;
+                debug = true;
             }
             else
             {
@@ -345,7 +354,7 @@ int main(int argc, char **argv)
         else if (j == 0)
         {
             endptr = NULL;
-            port = (unsigned short)strtol(ptr, &endptr, 10);
+            port = strtous(ptr, &endptr, 10);
             if (*ptr == '\0' || *endptr != '\0')
             {
                 printf("invalid port: %s\n", ptr);

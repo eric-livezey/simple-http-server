@@ -1,18 +1,74 @@
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <time.h>
+#include <netinet/in.h>
+#include "utils.h"
 #include "hashmap.h"
+#include "uri.h"
 
-#define iswhitespace(c) (c == ' ' || c == '\t')
-#define istchar(c) (c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~' || isdigit(c) || isalpha(c))
-#define isobschar(c) (c >= 0x80 && c <= 0xFF)
-#define isvchar(c) (c >= 0x21 && c <= 0x7E)
-#define isunreserved(c) (isalpha(c) || isdigit(c) || c == '-' || c == '.' || c == '_' || c == '~')
-#define issubdelim(c) (c == '!' || c == '$' || c == '&' || c == '\'' || c == '(' || c == ')' || c == '*' || c == '+' || c == ',' || c == ';' || c == '=')
-#define isqpair(ptr) ((ptr)[0] == '\\' && (iswhitespace((ptr)[1]) || isvchar((ptr)[1]) || isobschar((ptr)[1])))
-#define iscrlf(ptr) ((ptr)[0] == '\r' && (ptr)[1] == '\n')
-#define ispctenc(ptr) ((ptr)[0] == '%' && isxdigit((ptr)[1]) && isxdigit((ptr)[2]))
-#define ispchar(ptr) (isunreserved(*(ptr)) || ispctenc(ptr) || issubdelim(*(ptr)) || *(ptr) == ':' || *(ptr) == '@')
+// DIGIT
+static const uint64_t L_DIGIT = 0x3FF000000000000;
+static const uint64_t H_DIGIT = 0x0;
+
+// UPALPHA
+static const uint64_t L_UPALPHA = 0x0;
+static const uint64_t H_UPALPHA = 0x7FFFFFE;
+
+// LOWALPHA
+static const uint64_t L_LOWALPHA = 0x0;
+static const uint64_t H_LOWALPHA = 0x7FFFFFE00000000;
+
+// ALPHA
+static const uint64_t L_ALPHA = L_LOWALPHA | L_UPALPHA;
+static const uint64_t H_ALPHA = H_LOWALPHA | H_UPALPHA;
+
+// ALPHA / DIGIT
+static const uint64_t L_ALPHANUM = L_DIGIT | L_ALPHA;
+static const uint64_t H_ALPHANUM = H_DIGIT | H_ALPHA;
+
+// VCHAR
+static const uint64_t L_VCHAR = 0xfffffffe00000000;
+static const uint64_t H_VCHAR = 0x7fffffffffffffff;
+
+// SP / HTAB
+static const uint64_t L_LWSP_CHAR = 0x100000200; // low_mask(" \t")
+static const uint64_t H_LWSP_CHAR = 0x0;         // high_mask(" \t")
+
+// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+//         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+static const uint64_t L_TCHAR = L_ALPHANUM | 0x6cfa00000000;     // low_mask("!#$%&'*+-.^_`|~")
+static const uint64_t H_TCHAR = H_ALPHANUM | 0x50000001c0000000; // high_mask("!#$%&'*+-.^_`|~")
+
+// obs-text
+static const uint64_t L_OBS_TEXT = L_NON_ASCII;
+static const uint64_t H_OBS_TEXT = H_NON_ASCII;
+
+// qdtext = HTAB / SP / %x21 / %x23-5B / %x5D-7E / obs-text
+static const uint64_t L_QDTEXT = (L_LWSP_CHAR | L_VCHAR | L_OBS_TEXT) & ~0x400000000; // low_mask("\"")
+static const uint64_t H_QDTEXT = (H_LWSP_CHAR | H_VCHAR | H_OBS_TEXT) & ~0x10000000;  // high_mask("\\")
+
+// quoted-pair = "\" ( HTAB / SP / VCHAR / obs-text )
+static const uint64_t L_QUOTED_PAIR = L_LWSP_CHAR | L_VCHAR | L_OBS_TEXT;
+static const uint64_t H_QUOTED_PAIR = H_LWSP_CHAR | H_VCHAR | H_OBS_TEXT;
+
+// field-vchar =  VCHAR / obs-text
+static const uint64_t L_FIELD_VCHAR = L_VCHAR | L_OBS_TEXT;
+static const uint64_t H_FIELD_VCHAR = H_VCHAR | H_OBS_TEXT;
+
+// SP / HTAB / field-vchar
+static const uint64_t L_FIELD = L_LWSP_CHAR | L_FIELD_VCHAR;
+static const uint64_t H_FIELD = H_LWSP_CHAR | H_FIELD_VCHAR;
+
+// %x21-2B / %x2D-7E ; VCHAR excluding comma
+static const uint64_t L_RANGE = L_VCHAR & ~0x100000000000; // low_mask(",")
+static const uint64_t H_RANGE = H_VCHAR;
 
 // 8 MiB
-#define MAX_LINE_SIZE 8 * (1 << 20)
+#define MAX_LINE_SIZE 0x800000
+#define BUFFER_SIZE UINT16_MAX
 
 enum FLAGS
 {
@@ -23,29 +79,21 @@ enum FLAGS
     CONNECTION_CLOSED = 0b00010000
 };
 
-struct uri
-{
-    char *protocol;
-    char *host;
-    char *path;
-    MAP *query;
-};
-
 struct part
 {
     MAP *headers;
-    unsigned long content_length;
+    uint64_t content_length;
     char *content;
 };
 
 struct multipart
 {
-    struct part *parts;
-    unsigned long length;
+    struct part **parts;
+    int32_t length;
     STACK *stack;
 };
 
-struct content_type
+struct media_type
 {
     char *type;
     char *subtype;
@@ -54,36 +102,50 @@ struct content_type
 
 struct chunk
 {
-    unsigned long size;
+    uint64_t size;
     char *content;
     MAP *extension;
 };
 
-typedef struct HTTP_request
+struct int_range
+{
+    uint64_t first;
+    uint64_t last;
+};
+
+struct range
+{
+    char *units;
+    char **set;
+    int length;
+    STACK *stack;
+};
+
+struct http_request
 {
     char *method;
     struct uri *target;
-    char *protocol;
+    char *version;
     MAP *headers;
     char *content;
-    unsigned long content_length;
+    uint64_t content_length;
     MAP *trailers;
     STACK *stack;
-    short flags;
-} HTTP_request;
+    uint8_t flags;
+};
 
-typedef struct HTTP_response
+struct http_response
 {
-    char *protocol;
-    short code;
+    char *version;
+    uint16_t code;
     char *reason;
     MAP *headers;
     char *file;
     char *content;
-    unsigned long content_length;
+    uint64_t content_length;
     MAP *trailers;
     STACK *stack;
-} HTTP_response;
+};
 
 /*
  * -----------------
@@ -91,89 +153,36 @@ typedef struct HTTP_response
  * -----------------
  */
 
-struct uri *URI_init(struct uri *uri)
+void RANGE_init(struct range *r)
 {
-    uri->protocol = NULL;
-    uri->host = NULL;
-    uri->path = NULL;
-    uri->query = MAP_new_ignore_case();
+    r->units = NULL;
+    r->set = NULL;
+    r->length = 0;
+    r->stack = STACK_new();
 }
 
-int URI_size(struct uri *uri)
+void RANGE_free(struct range *r)
 {
-    int len = 0;
-    if (uri->protocol != NULL)
-        len += strlen(uri->protocol) + 3;
-    if (uri->host != NULL)
-        len += strlen(uri->host);
-    if (uri->path != NULL)
-        len += strlen(uri->path);
-    if (uri->query != NULL)
-    {
-        struct entry **es = MAP_entry_set(uri->query);
-        int size = MAP_size(uri->query);
-        for (int i = 0; i < size; i++)
-        {
-            len += 2;
-            len += strlen(es[i]->key);
-            len += strlen(es[i]->value);
-        }
-    }
-    return len;
+    STACK_free(r->stack);
 }
 
-int URI_tostr_ex(struct uri *uri, char *buffer)
-{
-    int len = 0;
-    *buffer = '\0';
-    if (uri->protocol != NULL)
-        len += sprintf(buffer + len, "%s://", uri->protocol);
-    if (uri->host != NULL)
-        len += sprintf(buffer + len, "%s", uri->host);
-    if (uri->path != NULL)
-        len += sprintf(buffer + len, "%s", uri->path);
-    if (uri->query != NULL)
-    {
-        struct entry **es = MAP_entry_set(uri->query);
-        int size = MAP_size(uri->query);
-        for (int i = 0; i < size; i++)
-        {
-            if (i == 0)
-                strcat(buffer + len, "?");
-            else
-                strcat(buffer + len, "&");
-            len += 1;
-            len += sprintf(buffer + len, "%s=%s", es[i]->key, (char *)es[i]->value);
-        }
-    }
-    return len;
-}
-
-char *URI_tostr(struct uri *uri)
-{
-    char *str = malloc(URI_size(uri));
-    URI_tostr_ex(uri, str);
-    return str;
-}
-
-void HTTP_request_init(HTTP_request *req)
+void HTTP_request_init(struct http_request *req)
 {
     req->method = "GET";
-    req->target = malloc(sizeof(struct uri));
-    req->protocol = "HTTP/1.1";
+    req->target = URI_new();
+    req->version = "HTTP/1.1";
     req->headers = MAP_new_ignore_case();
     req->content = NULL;
     req->content_length = 0;
     req->trailers = MAP_new_ignore_case();
     req->stack = STACK_new();
     req->flags = 0;
-    URI_init(req->target);
     STACK_push(req->stack, req->target);
 }
 
-void HTTP_response_init(HTTP_response *res)
+void HTTP_response_init(struct http_response *res)
 {
-    res->protocol = "HTTP/1.1";
+    res->version = "HTTP/1.1";
     res->code = 200;
     res->reason = "OK";
     res->headers = MAP_new_ignore_case();
@@ -184,10 +193,8 @@ void HTTP_response_init(HTTP_response *res)
     res->stack = STACK_new();
 }
 
-void HTTP_request_free(HTTP_request *req)
+void HTTP_request_free(struct http_request *req)
 {
-    if (req->target != NULL && req->target->query != NULL)
-        MAP_free(req->target->query);
     if (req->headers != NULL)
         MAP_free(req->headers);
     if (req->trailers != NULL)
@@ -195,7 +202,7 @@ void HTTP_request_free(HTTP_request *req)
     STACK_free(req->stack);
 }
 
-void HTTP_response_free(HTTP_response *res)
+void HTTP_response_free(struct http_response *res)
 {
     if (res->headers != NULL)
         MAP_free(res->headers);
@@ -216,7 +223,7 @@ char *HTTP_date(struct tm *tm)
     return HTTP_date_ex(tm, malloc(30 * sizeof(char)));
 }
 
-char *HTTP_reason(unsigned short code)
+char *HTTP_reason(uint16_t code)
 {
     switch (code)
     {
@@ -313,14 +320,13 @@ char *HTTP_reason(unsigned short code)
     }
 }
 
-MAP *content_type_map;
-char content_type_map_initialized = 0;
+MAP *content_type_map = NULL;
+bool content_type_map_initialized = false;
 
 char *HTTP_content_type(char *ext)
 {
     if (!content_type_map_initialized)
     {
-        content_type_map_initialized = 1;
         MAP *map = MAP_new_ignore_case();
         // video/matroska
         MAP_put(map, "mkv", "video/matroska");
@@ -362,140 +368,185 @@ char *HTTP_content_type(char *ext)
         // text/plain
         MAP_put(map, "txt", "text/plain");
         content_type_map = map;
+        content_type_map_initialized = true;
     }
     return MAP_get_or_default(content_type_map, ext, "*");
 }
 
-long HTTP_reqsize(HTTP_request *req)
+uint64_t HTTP_reqsize(struct http_request *req, bool head)
 {
-    char *date;
-    int i;
-    long len = 6;
+    // 2SP 2CRLF
+    uint64_t len = 6;
+    // request-method
     len += strlen(req->method);
+    // request-target
     len += URI_size(req->target);
-    len += strlen(req->protocol);
+    // HTTP-version
+    len += strlen(req->version);
     if (req->headers != NULL)
     {
-        struct entry **es = MAP_entry_set(req->headers);
+        struct entry **es = MAP_entry_set(req->headers), *e;
         int size = MAP_size(req->headers);
-        for (i = 0; i < size; i++)
+        for (int i = 0; i < size; i++)
         {
+            e = es[i];
+            // ":" SP CRLF
             len += 4;
-            len += strlen(es[i]->key);
-            len += strlen(es[i]->value);
+            // field-name
+            len += strlen(e->key);
+            // field-value
+            len += strlen(e->value);
         }
     }
-    if (req->content != NULL)
+    if (!head && req->content != NULL)
+    {
+        // content
         len += req->content_length;
+    }
     return len;
 }
 
-int HTTP_reqmsg_ex(HTTP_request *req, char *buffer)
+uint64_t HTTP_push_request(BUFFER *b, struct http_request *req, bool head)
 {
-    int i;
-    long len = 0;
-    // write message
-    *buffer = '\0';
-    len += sprintf(buffer + len, "%s ", req->method);
-    // target
-    len += URI_tostr_ex(req->target, buffer + len);
-    len += sprintf(buffer + len, " %s\r\n", req->protocol);
+    uint64_t initial_size = BUFFER_size(b);
+    // request-method SP
+    BUFFER_sprintf(b, "%s ", req->method);
+    // request-target
+    URI_sprint(b, req->target);
+    // SP HTTP-version CRLF
+    BUFFER_sprintf(b, " %s\r\n", req->version);
     if (req->headers != NULL)
     {
         // headers
-        struct entry **es = MAP_entry_set(req->headers);
+        struct entry **es = MAP_entry_set(req->headers), *e;
         int size = MAP_size(req->headers);
-        for (i = 0; i < size; i++)
-            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
-    }
-    // use memcpy so as not to put a terminating '\0' which might index out of the buffer
-    memcpy(buffer + len, "\r\n", 2);
-    len += 2;
-    // body
-    if (req->content != NULL)
-        memcpy(buffer + len, req->content, req->content_length);
-    return len;
-}
-
-char *HTTP_reqmsg(HTTP_request *req)
-{
-    char *msg = malloc(HTTP_reqsize(req));
-    HTTP_reqmsg_ex(req, msg);
-    return msg;
-}
-
-unsigned long HTTP_ressize(HTTP_response *res, char head)
-{
-    char *date;
-    int i;
-    unsigned long len = 9;
-    len += strlen(res->protocol);
-    len += strlen(res->reason);
-    if (res->headers != NULL)
-    {
-        struct entry **es = MAP_entry_set(res->headers);
-        int size = MAP_size(res->headers);
-        for (i = 0; i < size; i++)
+        for (int i = 0; i < size; i++)
         {
-            len += 4;
-            len += strlen(es[i]->key);
-            len += strlen(es[i]->value);
+            e = es[i];
+            // field-name ":" SP field-value CRLF
+            BUFFER_sprintf(b, "%s: %s\r\n", e->key, e->value);
         }
     }
-    if (!head && res->content != NULL)
-        len += res->content_length;
+    // CRLF
+    BUFFER_sprint(b, "\r\n");
+    if (!head && req->content != NULL)
+    {
+        // content
+        BUFFER_push(b, req->content, req->content_length);
+    }
+    return BUFFER_size(b) - initial_size;
+}
+
+uint64_t HTTP_reqmsg_ex(struct http_request *req, bool head, uint8_t **result)
+{
+    uint64_t size = HTTP_reqsize(req, head);
+    BUFFER *b = BUFFER_new(size);
+    HTTP_push_request(b, req, head);
+    return BUFFER_get_ex(b, result);
+}
+
+uint8_t *HTTP_reqmsg(struct http_request *req, bool head)
+{
+    uint64_t size = HTTP_reqsize(req, head);
+    BUFFER *b = BUFFER_new(size);
+    HTTP_push_request(b, req, head);
+    return BUFFER_get(b);
+}
+
+void HTTP_print_request(struct http_request *req)
+{
+    uint64_t size = HTTP_reqsize(req, true) + 1;
+    BUFFER *b = BUFFER_new(size);
+    HTTP_push_request(b, req, true);
+    BUFFER_pushb(b, 0);
+    char *s = BUFFER_get(b);
+    printf("================ REQUEST ================\r\n\r\n%s\r\n", s);
+    free(s);
+}
+
+uint64_t HTTP_ressize(struct http_response *req, bool head)
+{
+    // 2SP 3DIGIT 2CRLF
+    uint64_t len = 9;
+    // HTTP-version
+    len += strlen(req->version);
+    // reason-phrase
+    len += strlen(req->reason);
+    if (req->headers != NULL)
+    {
+        struct entry **es = MAP_entry_set(req->headers), *e;
+        int size = MAP_size(req->headers);
+        for (int i = 0; i < size; i++)
+        {
+            e = es[i];
+            // ":" SP CRLF
+            len += 4;
+            // field-name
+            len += strlen(e->key);
+            // field-value
+            len += strlen(e->value);
+        }
+    }
+    if (!head && req->content != NULL)
+    {
+        // content
+        len += req->content_length;
+    }
     return len;
 }
 
-int HTTP_resmsg_ex(HTTP_response *res, bool head, char *buffer)
+uint64_t HTTP_push_response(BUFFER *b, struct http_response *res, bool head)
 {
-    long len = 0;
-    /* write message */
-    *buffer = '\0';
-    len += sprintf(buffer, "%s %d %s\r\n", res->protocol, res->code, res->reason); /* protocol code reason */
+    uint64_t initial_size = BUFFER_size(b);
+    // HTTP-version SP status-code SP reason-phrase CRLF
+    BUFFER_sprintf(b, "%s %d %s\r\n", res->version, res->code, res->reason);
     if (res->headers != NULL)
     {
-        struct entry **es = MAP_entry_set(res->headers);
+        // headers
+        struct entry **es = MAP_entry_set(res->headers), *e;
         int size = MAP_size(res->headers);
-        for (int i = 0; i < size; i++) /* headers */
-            len += sprintf(buffer + len, "%s: %s\r\n", es[i]->key, (char *)es[i]->value);
+        for (int i = 0; i < size; i++)
+        {
+            e = es[i];
+            // field-name ":" SP field-value CRLF
+            BUFFER_sprintf(b, "%s: %s\r\n", e->key, e->value);
+        }
     }
-    /* use memcpy so as not to put a terminating '\0' which might index out of the buffer */
-    memcpy(buffer + len, "\r\n", 2);
-    len += 2;
-    if (!head && res->content != NULL) /* body */
-        memcpy(buffer + len, res->content, res->content_length);
-    return len;
+    // CRLF
+    BUFFER_sprint(b, "\r\n");
+    if (!head && res->content != NULL)
+    {
+        // content
+        BUFFER_push(b, res->content, res->content_length);
+    }
+    return BUFFER_size(b) - initial_size;
 }
 
-char *HTTP_resmsg(HTTP_response *res, bool head)
+uint64_t HTTP_resmsg_ex(struct http_response *res, bool head, uint8_t **result)
 {
-    char *msg = malloc(HTTP_ressize(res, head));
-    HTTP_resmsg_ex(res, head, msg);
-    return msg;
+    uint64_t size = HTTP_ressize(res, head);
+    BUFFER *b = BUFFER_new(size);
+    HTTP_push_response(b, res, head);
+    return BUFFER_get_ex(b, result);
 }
 
-void HTTP_print_request(HTTP_request *req)
+uint8_t *HTTP_resmsg(struct http_response *res, bool head)
 {
-    void *content = req->content;
-    req->content = NULL;
-    unsigned long size = HTTP_reqsize(req) + 1;
-    char *msg = malloc(size);
-    HTTP_reqmsg_ex(req, msg);
-    msg[size - 1] = '\0';
-    printf("================ REQUEST  ================\r\n\r\n%s\r\n", msg);
-    free(msg);
-    req->content = content;
+    uint64_t size = HTTP_ressize(res, head);
+    BUFFER *b = BUFFER_new(size);
+    HTTP_push_response(b, res, head);
+    return BUFFER_get(b);
 }
 
-void HTTP_print_response(HTTP_response *res)
+void HTTP_print_response(struct http_response *res)
 {
-    unsigned long size = HTTP_ressize(res, 1) + 1;
-    char *msg = malloc(size);
-    HTTP_resmsg_ex(res, 1, msg);
-    msg[size - 1] = '\0';
-    printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", msg); /* print response head */
-    free(msg);
+    uint64_t size = HTTP_ressize(res, true) + 1;
+    BUFFER *b = BUFFER_new(size);
+    HTTP_push_response(b, res, true);
+    BUFFER_pushb(b, 0);
+    char *s = BUFFER_get(b);
+    printf("---------------- RESPONSE ----------------\r\n\r\n%s\r\n", s);
+    free(s);
 }
 
 /*
@@ -504,925 +555,1010 @@ void HTTP_print_response(HTTP_response *res)
  * -----------------
  */
 
-char *parse_qstring(char *ptr, char **endptr)
+int32_t scan_crlf(char *ptr, char **endptr)
 {
-    long offset = 0;
-    if (*ptr != '"')
-        return NULL;
-    ptr++;
-    *endptr = ptr;
-    while (*(*endptr) != '"' && !iscrlf(*endptr))
+    char *ep = ptr;
+    // Process CRLF
+    if (*ep++ != '\r' || *ep++ != '\n')
     {
-        if (isqpair(*endptr))
+        return -1;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+int32_t scan_quoted_pair(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // Process quoted pair
+    if (*ep++ != '\\' || !match(*ep++, L_QUOTED_PAIR, H_QUOTED_PAIR))
+    {
+        return -1;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+int32_t scan_qstring(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // DQUOTE
+    if (*ep != '"')
+    {
+        return -1;
+    }
+    ep++;
+    // *( qdtext / quoted-pair )
+    if (scan_r(ep, &ep, &scan_quoted_pair, L_QDTEXT, H_QDTEXT) < 0)
+    {
+        return -1;
+    }
+    // DQUOTE
+    if (*ep != '"')
+    {
+        return -1;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// quoted-string  = DQUOTE *( qdtext / quoted-pair ) DQUOTE
+int32_t parse_qstring(char *ptr, char **endptr, char **s)
+{
+    bool pair = false;
+    char *p, *ep = ptr;
+    int32_t offset = 0;
+    // DQUOTE
+    if (*ep != '"')
+        return -1;
+    ep++;
+    p = ep;
+    // *( qdtext / quoted-pair )
+    while (match(*ep, L_QDTEXT, H_QDTEXT) || (pair = scan_quoted_pair(ep, &ep) >= 0))
+    {
+        if (pair)
         {
-            (*endptr)++;
+            ep--;
             offset--;
         }
-        (*endptr)[offset] = *(*endptr);
-        (*endptr)++;
+        (ep++)[offset] = *ep;
+        pair = false;
     }
-    if (iscrlf(*endptr))
-        return NULL;
-    (*endptr)[offset] = '\0';
-    (*endptr)++;
-    return ptr;
-}
-
-MAP *parse_parameters(char *ptr, MAP *result)
-{
-    char *endptr = ptr, *k, *v;
-    while (*ptr != '\0')
+    // DQUOTE
+    if (*ep != '"')
     {
-        // OWS
-        while (iswhitespace(*ptr))
-            ptr++;
-        // ';'
-        if (*ptr != ';')
-            return NULL;
-        ptr++;
-        *endptr = '\0';
-        // OWS
-        while (iswhitespace(*ptr))
-            ptr++;
-        if (*ptr == '\0')
-            break;
-        // token
-        k = endptr = ptr;
-        while (istchar(*endptr))
-            endptr++;
-        if (endptr == ptr)
-            return NULL;
-        ptr = endptr;
-        // '='
-        if (*ptr != '=')
-            return NULL;
-        ptr++;
-        *endptr = '\0';
-        // token / quoted-string
-        if (*ptr == '"')
-        {
-            // quoted-string
-            if ((v = parse_qstring(ptr, &endptr)) == NULL)
-                return NULL;
-        }
-        else
-        {
-            // token
-            v = endptr = ptr;
-            while (istchar(*endptr))
-                endptr++;
-            if (endptr == ptr)
-                return NULL;
-        }
-        ptr = endptr;
-        MAP_put(result, k, v);
+        return -1;
     }
-    if (*endptr != '\0')
-        return NULL;
-    return result;
+    (ep++)[offset] = '\0';
+    *s = p;
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
 
-unsigned long *parse_range(char *ptr, unsigned long size, unsigned long *result)
+int scan_ows(char *ptr, char **endptr)
 {
-    char firstpos = 1, *endptr;
-    // "bytes" (only byte ranges are acceptable)
-    if (strncmp(ptr, "bytes", 5) != 0)
-        return NULL;
-    ptr += 5;
+    return scan(ptr, endptr, L_LWSP_CHAR, H_LWSP_CHAR);
+}
+
+// token = 1*tchar
+int scan_token(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    if (scan(ep, &ep, L_TCHAR, H_TCHAR) < 1)
+    {
+        return -1;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// parameter       = parameter-name "=" parameter-value
+// parameter-name  = token
+// parameter-value = ( token / quoted-string )
+int HTTP_parse_parameter(char *ptr, char **endptr, struct entry *result)
+{
+    char *ep = ptr, *k, *v;
+    k = ep;
+    // token
+    if (scan_token(ep, &ep) < 0)
+    {
+        return -1;
+    }
     // '='
-    if (*ptr != '=')
-        return NULL;
-    ptr++;
+    if (*ep != '=')
+    {
+        return -1;
+    }
+    *ep = '\0';
+    ep++;
+    v = ep;
+    // token / quoted-string
+    if (scan_token(ep, &ep) < 0 && parse_qstring(ep, &ep, &v) < 0)
+    {
+        return -1;
+    }
+    result->key = k;
+    result->value = v;
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// parameters      = *( OWS ";" OWS [ parameter ] )
+int HTTP_parse_parameters(char *ptr, char **endptr, MAP *result)
+{
+    char *p, *ep = ptr;
+    struct entry e;
+    while (*ep)
+    {
+        p = ep;
+        // OWS
+        scan_ows(ep, &ep);
+        // ";"
+        if (*ep != ';')
+        {
+            ep = p;
+            break;
+        }
+        *ep = '\0';
+        ep++;
+        // OWS
+        scan_ows(ep, &ep);
+        // parameter
+        if (HTTP_parse_parameter(ep, &ep, &e) < 0)
+        {
+            continue;
+        }
+        MAP_put(result, e.key, e.value);
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// int-range     = first-pos "-" [ last-pos ]
+// first-pos     = 1*DIGIT
+// last-pos      = 1*DIGIT
+// suffix-range  = "-" suffix-length
+// suffix-length = 1*DIGIT
+int HTTP_parse_int_range(char *ptr, char **endptr, uint64_t size, struct int_range *r)
+{
+    bool has_first, has_last;
+    char *p, *ep = ptr;
+    uint64_t n;
     // first-pos
-    endptr = ptr;
-    if (isdigit(*ptr))
-        result[0] = strtoul(ptr, &endptr, 10);
-    else
-        result[0] = 0;
-    if (*endptr != '-')
-        return NULL;
-    if (ptr == endptr)
-        firstpos = 0; // false
-    ptr = endptr;
-    ptr++;
+    p = ep;
+    n = strtoull(ep, &ep, 10);
+    has_first = ep > p;
+    r->first = has_first ? n : 0;
+    // "-"
+    if (*ep != '-')
+    {
+        return -1;
+    }
+    ep++;
     // last-pos
-    endptr = ptr;
-    if (isdigit(*ptr))
-        result[1] = strtoul(ptr, &endptr, 10);
-    else
-        result[1] = size - 1;
-    if (*endptr != '\0' || !firstpos && ptr == endptr)
-        return NULL;
-    return result;
+    p = ep;
+    n = strtoull(ep, &ep, 10);
+    has_last = ep > p;
+    if (!has_first && !has_last)
+    {
+        return -1;
+    }
+    r->last = has_last ? n : size - 1;
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
 
-struct content_type *parse_content_type(char *ptr, struct content_type *result)
+// range-spec       = int-range
+//                  / suffix-range
+//                  / other-range
+// int-range     = first-pos "-" [ last-pos ]
+// first-pos     = 1*DIGIT
+// last-pos      = 1*DIGIT
+// suffix-range  = "-" suffix-length
+// suffix-length = 1*DIGIT
+// other-range   = 1*( %x21-2B / %x2D-7E )
+//               ; 1*(VCHAR excluding comma)
+int HTTP_scan_range_spec(char *ptr, char **endptr)
 {
-    char *endptr;
-    // token
-    result->type = endptr = ptr;
-    while (istchar(*endptr))
-        endptr++;
-    if (endptr == ptr)
-        return NULL;
-    ptr = endptr;
-    // '/'
-    if (*ptr != '/')
-        return NULL;
-    ptr++;
-    *endptr = '\0';
-    // token
-    result->subtype = endptr = ptr;
-    while (istchar(*endptr))
-        endptr++;
-    if (endptr == ptr)
-        return NULL;
-    ptr = endptr;
-    // parameters
-    if (parse_parameters(ptr, result->parameters) == NULL)
-        return NULL;
-    *endptr = '\0';
-    return result;
+    char *ep = ptr;
+    // int-range and suffix-range are both satisfiable by other-range
+    if (scan(ep, &ep, L_RANGE, H_RANGE) < 1)
+    {
+        return -1;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
 
-MAP *parse_query(char *ptr, char **endptr, MAP *result)
+// ranges-specifier = range-unit "=" range-set
+// range-unit       = token
+// range-set        = range-spec *( OWS "," OWS range-spec )
+int HTTP_parse_range(char *ptr, char **endptr, struct range *r)
 {
-    char *ep = ptr, *k, *v, c;
-    // '?'
-    if (*ptr != '?')
-        return NULL;
-    ptr++;
+    char *p, *s, *ep = ptr;
+    int len;
+    // range-unit
+    p = ptr;
+    if (scan_token(ep, &ep) < 0)
+    {
+        return -1;
+    }
+    // "="
+    if (*ep != '=')
+    {
+        return -1;
+    }
+    *ep = '\0';
+    r->units = p;
+    ep++;
+    // range-set
+    // range-spec
+    p = ep;
+    if ((len = HTTP_scan_range_spec(ep, &ep)) < 0)
+    {
+        return -1;
+    }
+    STACK *specs = STACK_new();
+    STACK_push(specs, strnalloc(p, len, r->stack));
+    // *
     while (1)
     {
-        // pchar / "/" / "?"
-        k = ep = ptr;
-        while (*ep != '=' && (*ep == '/' || *ep == '?' || ispchar(ep)))
-            ep++;
-        ptr = ep;
-        // "="
-        if (*ptr != '=')
+        // (
+        p = ep;
+        // OWS
+        scan_ows(ep, &ep);
+        // ","
+        if (*ep != ',')
         {
-            v = ep;
-            MAP_put(result, k, v);
+            ep = p;
             break;
         }
-        *ep = '\0';
-        ptr++;
-        // pchar / "/" / "?"
-        v = ep = ptr;
-        while (*ep != '&' && (*ep == '/' || *ep == '?' || ispchar(ep)))
-            ep++;
-        ptr = ep;
-        MAP_put(result, k, v);
-        // [ "&" ]
-        if (*ptr != '&')
+        // OWS
+        scan_ows(ep, &ep);
+        s = ep;
+        // range-spec
+        if ((len = HTTP_scan_range_spec(ep, &ep)) < 0)
+        {
+            ep = p;
             break;
-        *ep = '\0';
-        ptr++;
+        }
+        STACK_push(specs, strnalloc(s, len, r->stack));
+        // )
     }
-    // temporarily set the endptr to null do as not to url decode past the end of the last value
-    c = *ep;
-    *ep = '\0';
-    for (int i = 0; i < MAP_size(result); i++)
+    int size = STACK_size(specs);
+    r->set = malloc(size * sizeof(char *));
+    STACK_push(r->stack, r->set);
+    while (!STACK_empty(specs))
     {
-        k = MAP_entry_set(result)[i]->key;
-        v = MAP_entry_set(result)[i]->value;
-        urldecode(k, k);
-        urldecode(v, v);
+        r->set[STACK_size(specs) - 1] = STACK_pop(specs);
     }
-    *ep = c;
-    *endptr = ep;
-    return result;
+    STACK_free(specs);
+    r->length = size;
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
 
-struct uri *parse_origin_form(char *ptr, char **endptr, struct uri *result)
+typedef int(parser_t)(char *, char **, void *);
+
+/// @brief Parse a line from the ptr into the result using the parser.
+/// @note Technically, this could index out of a buffer if we passed an argument for ptr which did
+/// not end in a CRLF. This is not an issue for this implementation though since we only receive lines
+/// up to and including a terminating CRLF.
+/// @param ptr The pointer.
+/// @param parser The parser function.
+/// @param result The result object for the parser.
+/// @return The number of bytes parsed
+uint32_t HTTP_parseln(char *ptr, parser_t *parser, void *result)
 {
-    char *ep = ptr;
-    // 1*( "/" segment )
-    result->path = ep = ptr;
-    while (*ep == '/')
+    char *p, *ep = ptr;
+    if (parser(ep, &ep, result) < 0)
     {
-        ep++;
-        while (ispchar(ep))
-            ep++;
+        return -1;
     }
-    if (ptr == ep)
-        return NULL;
-    *endptr = ptr = ep;
-    // [ "?" query ]
-    if (parse_query(ptr, endptr, result->query) == NULL)
-        MAP_clear(result->query);
-    else
-        *ep = '\0';
-    return result;
+    p = ep;
+    if (scan_crlf(ep, &ep) < 0)
+    {
+        return -1;
+    }
+    *p = '\0';
+    return ep - ptr;
 }
 
-/// ```abnf
-/// *( "/" segment )
-/// ```
-char *parse_path_abempty(char *ptr, char **endptr)
+// content-type = media-type
+// media-type   = type "/" subtype parameters
+// type         = token
+// subtype      = token
+int HTTP_parse_media_type(char *ptr, char **endptr, struct media_type *result)
 {
     char *ep = ptr;
-    // *( "/" segment )
-    while (*ep == '/')
+    // type
+    result->type = ep;
+    if (scan_token(ep, &ep) < 0)
     {
-        ep++;
-        while (ispchar(ep))
-            ep++;
+        return -1;
     }
-    *endptr = ep;
-    return ptr;
-}
-/// ```abnf
-/// "/" [ segment-nz *( "/" segment ) ]
-/// ```
-char *parse_path_absolute(char *ptr, char **endptr)
-{
-    char *ep = ptr;
     // "/"
     if (*ep != '/')
-        return NULL;
-    ep++;
-    // [ segment-nz *( "/" segment ) ]
-    if (ispchar(ep))
     {
-        ep++;
-        while (ispchar(ep))
-            ep++;
-        // *( "/" segment )
-        if (parse_path_abempty(ep, &ep) == NULL)
-            return NULL;
+        return -1;
     }
-    *endptr = ep;
-    return ptr;
-}
-/// ```abnf
-/// segment-nz *( "/" segment )
-/// ```
-char *parse_path_rootless(char *ptr, char **endptr)
-{
-    char *ep = ptr;
-    if (!ispchar(ep))
-        return NULL;
+    *ep = '\0';
     ep++;
-    while (ispchar(ep))
-        ep++;
-    // *( "/" segment )
-    if (parse_path_abempty(ep, &ep) == NULL)
-        return NULL;
-    *endptr = ep;
-    return ptr;
+    // subtype
+    result->subtype = ep;
+    if (scan_token(ep, &ep) < 0)
+    {
+        return -1;
+    }
+    // parameters
+    if (HTTP_parse_parameters(ep, &ep, result->parameters) < 0)
+    {
+        return -1;
+    }
+    if (*ep != '\0')
+    {
+        return -1;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
 
-/// ```abnf
-/// DIGIT / %x31-39 DIGIT / "1" 2DIGIT / "2" %x30-34 DIGIT / "25" %x30-35 ; Any number from 0-255
-/// ```
-char *parse_dec_octet(char *ptr, char **endptr)
+// authority-form = uri-host ":" port
+int HTTP_parse_authority_form(char *ptr, char **endptr, struct uri *uri)
 {
-    char *ep = ptr;
-    // Parse the integer until it's 3 digits long
-    short n = 0;
-    while (n < 100 && isdigit(*ep))
-    {
-        n = n * 10 + (*ep - '0');
-        ep++;
-    }
-    if (n > 255)
-        // The number is greater than 255, so omit the last character
-        ep--;
-    if (ptr == ep)
-        // The string is empty, so return null
-        return NULL;
-    *endptr = ep;
-    return ptr;
-}
-/// ```abnf
-/// dec-octet "." dec-octet "." dec-octet "." dec-octet
-/// ```
-char *parse_ipv4_address(char *ptr, char **endptr)
-{
-    char *ep = ptr;
-    // dec-octet
-    if (parse_dec_octet(ep, &ep) == NULL)
-    {
-        return NULL;
-    }
-    for (char i = 0; i < 3; i++)
-    {
-        // "."
-        if (*ep != '.')
-            return NULL;
-        ep++;
-        // dec-octet
-        if (parse_dec_octet(ep, &ep) == NULL)
-            return NULL;
-    }
-    *endptr = ep;
-    return ptr;
-}
-
-/// ```abnf
-///                              6( h16 ":" ) ls32
-/// /                       "::" 5( h16 ":" ) ls32
-/// / [               h16 ] "::" 4( h16 ":" ) ls32
-/// / [ *1( h16 ":" ) h16 ] "::" 3( h16 ":" ) ls32
-/// / [ *2( h16 ":" ) h16 ] "::" 2( h16 ":" ) ls32
-/// / [ *3( h16 ":" ) h16 ] "::"    h16 ":"   ls32
-/// / [ *4( h16 ":" ) h16 ] "::"              ls32
-/// / [ *5( h16 ":" ) h16 ] "::"              h16
-/// / [ *6( h16 ":" ) h16 ] "::"
-/// ```
-char *parse_ipv6_address(char *ptr, char **endptr)
-{
-    // The unusually long abnf is just to account for the short form
-    // :: is valid
-    // FFFF::FF is valid
-    // ::FFFF::FFFF is ambigous so invalid
-    // FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF is valid
-    // FF::FFFF:FFFF:FFFF:FFFF:255.255.255.255 is valid
-    // Essentially up to 8 segments with no more than one short form
-    // Then the last two segments can be an ipv4
-    char *ep = ptr, n = 0, len;
-    bool short_form = false, separated = true;
-    while (n < 8)
-    {
-        if (separated && (n == 6 || short_form && n < 6) && parse_ipv4_address(ep, &ep) != NULL)
-        {
-            // Pointer is a terminating IPv4 address, so count 2 segments and break
-            n += 2;
-            break;
-        }
-        else if (separated && isxdigit(*ep))
-        {
-            // Character is a hex digit, so parse up to 4 hex digits
-            separated = false;
-            len = 0;
-            while (isxdigit(*ep) && len < 4)
-            {
-                ep++;
-                len++;
-            }
-            n++;
-        }
-        else if (n == 0 && *ep == ':')
-        {
-            // Character is ":" and is the first character, so parse the short form
-            ep++;
-            if (*ep != ':')
-                return NULL;
-            ep++;
-            n++;
-            short_form = true;
-        }
-        else if (!separated && *ep == ':')
-        {
-            // Character is ":", so parse the separator or short form
-            separated = true;
-            ep++;
-            if (!short_form && *ep == ':')
-            {
-                // Next character is ":" and no short form has been parsed, so parse the short form
-                ep++;
-                n++;
-                short_form = true;
-            }
-        }
-        else
-        {
-            // Pointer is not a valid token, so break
-            break;
-        }
-    }
-    if (n != 8 && (!short_form || n > 8))
-        // There must be either 8 segments or the short form and less than 8 segments, so return null
-        return NULL;
-    *endptr = ep;
-    return ptr;
-}
-
-// ```abnf
-// "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
-// ```
-char *parse_ipvfuture(char *ptr, char **endptr)
-{
-    char *ep = ptr, len;
-    // "v"
-    if (*ep != 'v')
-        return NULL;
-    ep++;
-    // 1*HEXDIG
-    len = 0;
-    while (isxdigit(*ep))
-    {
-        ep++;
-        len++;
-    }
-    if (len < 1)
-        return NULL;
-    // "."
-    if (*ep != '.')
-        return NULL;
-    ep++;
-    // 1*( unreserved / sub-delims / ":" )
-    len = 0;
-    while (isunreserved(*ep) || issubdelim(*ep) || *ep == ':')
-    {
-        ep++;
-        len++;
-    }
-    if (len < 1)
-        return NULL;
-    *endptr = ep;
-    return ptr;
-}
-/// ```abnf
-/// "[" ( IPv6address / IPvFuture ) "]"
-/// ```
-char *parse_ip_literal(char *ptr, char **endptr)
-{
-    char *ep = ptr;
-    // "["
-    if (*ep != '[')
-        return NULL;
-    ep++;
-    // ( IPv6address / IPvFuture )
-    if (parse_ipv6_address(ep, &ep) == NULL && parse_ipvfuture(ep, &ep) == NULL)
-        return NULL;
-    // "]"
-    if (*ep != ']')
-        return NULL;
-    ep++;
-    *endptr = ep;
-    return ptr;
-}
-
-/// ```abnf
-/// [ userinfo "@" ] host [ ":" port ]
-/// ```
-char *parse_authority(char *ptr, char **endptr)
-{
-    char *ep = ptr;
-    // *( unreserved / pct-encoded / sub-delims / ":" )
-    while (isunreserved(*ep) || ispctenc(ep) || issubdelim(*ep) || *ep == ':')
-        ep++;
-    // "@"
-    if (*ep == '@')
-        ep++;
-    else
-        ep = ptr;
+    char *p = ptr, *ep = ptr;
     // IP-literal / IPv4address / reg-name
-    if (parse_ip_literal(ep, &ep) == NULL && parse_ipv4_address(ep, &ep) == NULL)
+    if (scan_ip_literal(ep, &ep) < 0 && scan_ipv4_address(ep, &ep) < 0 && scan_reg_name(ep, &ep) < 0)
     {
-        // *( unreserved / pct-encoded / sub-delims )
-        while (isunreserved(*ep) || ispctenc(ep) || issubdelim(*ep))
-            ep++;
+        return -1;
     }
+    uri->host = p;
     // ":" port
     if (*ep == ':')
     {
+        *ep = '\0';
         ep++;
         // *DIGIT
-        while (isdigit(*ep))
-            ep++;
+        uri->port = strtoi(ep, &ep, 10);
     }
-    *endptr = ep;
-    return ptr;
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
-/// ```abnf
-/// scheme ":" hier-part [ "?" query ]
-/// ```
-struct uri *parse_absolute_form(char *ptr, char **endptr, struct uri *result, STACK *stack)
+
+// origin-form    = absolute-path [ "?" query ]
+int HTTP_parse_origin_form(char *ptr, char **endptr, struct uri *uri)
+{
+    char *p = ptr, *ep = ptr;
+    // 1*( "/" segment )
+    if (scan_path_abempty(ep, &ep) < 1)
+    {
+        return -1;
+    }
+    uri->path = p;
+    p = ep;
+    // [ "?" query ]
+    if (scan_query(ep, &ep) >= 0)
+    {
+        *p = '\0';
+        p++;
+        uri->query = p;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// request-target = origin-form
+//                / absolute-form
+//                / authority-form
+//                / asterisk-form
+// absolute-form  = absolute-URI
+// asterisk-form  = "*"
+int HTTP_parse_request_target(char *ptr, char **endptr, struct uri *uri, STACK *stack)
 {
     char *ep = ptr;
-    result->protocol = ep = ptr;
-    // ALPHA
-    if (!isalpha(*ep))
-        return NULL;
+    // origin-form / absolute-form / authority-form
+    if (HTTP_parse_origin_form(ep, &ep, uri) < 0 && parse_absolute_URI(ep, &ep, uri, stack) < 0 && HTTP_parse_authority_form(ep, &ep, uri) < 0)
+    {
+        // "*"
+        if (*ep = '*')
+        {
+            ep++;
+            uri->host = "*";
+        }
+        else
+        {
+            return -1;
+        }
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// HTTP-version   = HTTP-name "/" DIGIT "." DIGIT
+// HTTP-name      = %x48.54.54.50 ; HTTP
+int HTTP_scan_HTTP_version(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // %x48.54.54.50 ; HTTP
+    if (strncmp(ep, "HTTP", 4) != 0)
+    {
+        return -1;
+    }
+    ep += 4;
+    // "/"
+    if (*ep != '/')
+    {
+        return -1;
+    }
     ep++;
-    // *( ALPHA / DIGIT / "+" / "-" / "." )
-    while (isalnum(*ep) || *ep == '+' || *ep == '-' || *ep == '.')
-        ep++;
-    ptr = ep;
-    // ":"
-    if (*ptr != ':')
-        return NULL;
-    ptr++;
+    // DIGIT
+    if (!isdigit(*ep))
+    {
+        return -1;
+    }
+    ep++;
+    // '.'
+    if (*ep != '.')
+    {
+        return -1;
+    }
+    ep++;
+    // DIGIT
+    if (!isdigit(*ep))
+    {
+        return -1;
+    }
+    ep++;
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// request-line   = method SP request-target SP HTTP-version
+// method         = token
+int HTTP_parse_request_line(char *ptr, char **endptr, struct http_request *req)
+{
+    char *p, *ep = ptr;
+    // method
+    p = ep;
+    if (scan_token(ep, &ep) < 0)
+    {
+        return -1;
+    }
+    // SP
+    if (*ep != ' ')
+    {
+        return -1;
+    }
     *ep = '\0';
-    ep = ptr;
-    // "//" authority path-abempty / path-absolute / path-rootless / path-empty
-    if (strncmp(ep, "//", 2) != 0 || (result->host = parse_authority(ep + 2, &ep)) == NULL || (result->path = parse_path_abempty(ep, &ep)) == NULL)
-    {
-        ep = ptr;
-        if ((result->path = parse_path_absolute(ep, &ep)) == NULL)
-            result->path = parse_path_rootless(ep, &ep);
-    }
-    if (result->host != NULL)
-    {
-        unsigned char len = ep - result->path;
-        char *path = malloc(len + 1);
-        STACK_push(stack, path);
-        strncpy(path, result->path, len);
-        *(result->path) = '\0';
-        result->path = path;
-    }
-    *endptr = ptr = ep;
-    // [ "?" query ]
-    if (parse_query(ptr, endptr, result->query) == NULL)
-        MAP_clear(result->query);
-    else
-        *ep = '\0';
-    return result;
-}
-/// ```abnf
-/// (IP-literal / IPv4address / reg-name) ":" *DIGIT
-/// ```
-struct uri *parse_authority_form(char *ptr, char **eptr, struct uri *result)
-{
-    char *endptr = ptr;
-    result->host = ptr;
-    // IP-literal / IPv4address / reg-name
-    if (parse_ip_literal(endptr, &endptr) == NULL && parse_ipv4_address(endptr, &endptr) == NULL)
-    {
-        // *( unreserved / pct-encoded / sub-delims )
-        while (isunreserved(*endptr) || ispctenc(endptr) || issubdelim(*endptr))
-            endptr++;
-    }
-    // ":" port
-    if (*endptr == ':')
-    {
-        endptr++;
-        // *DIGIT
-        while (isdigit(*endptr))
-            endptr++;
-    }
-    *eptr = endptr;
-    return result;
-}
-
-struct uri *HTTP_parse_target(char *ptr, char **endptr, struct uri *result, STACK *stack)
-{
-    if (parse_origin_form(ptr, endptr, result) == NULL && parse_absolute_form(ptr, endptr, result, stack) == NULL && parse_authority_form(ptr, endptr, result) == NULL)
-    {
-        if (*ptr = '*')
-        {
-            if (*endptr != NULL)
-                *endptr = ptr + 1;
-            **endptr = '\0';
-        }
-        else
-        {
-            return NULL;
-        }
-    }
-    return result;
-}
-
-struct HTTP_request *HTTP_parse_reqln(char *ptr, struct HTTP_request *result)
-{
-    char *endptr;
-    // token
-    result->method = endptr = ptr;
-    while (istchar(*endptr))
-        endptr++;
-    if (endptr == ptr)
-        return NULL;
-    ptr = endptr;
-    // SP
-    if (*ptr != ' ')
-        return NULL;
-    ptr++;
-    *endptr = '\0';
+    req->method = p;
+    ep++;
     // request-target
-    if (HTTP_parse_target(ptr, &endptr, result->target, result->stack) == NULL)
-        return NULL;
-    ptr = endptr;
-    // SP
-    if (*ptr != ' ')
-        return NULL;
-    ptr++;
-    *endptr = '\0';
-    // "HTTP"
-    result->protocol = endptr = ptr;
-    if (strncmp(endptr, "HTTP", 4) != 0)
-        return NULL;
-    endptr += 4;
-    // '/'
-    if (*endptr != '/')
-        return NULL;
-    endptr++;
-    // DIGIT
-    if (!isdigit(*endptr))
-        return NULL;
-    endptr++;
-    // '.'
-    if (*endptr != '.')
-        return NULL;
-    endptr++;
-    // DIGIT
-    if (!isdigit(*endptr))
-        return NULL;
-    endptr++;
-    // CRLF
-    if (!iscrlf(endptr))
-        return NULL;
-    *endptr = '\0';
-    return result;
-}
-
-struct HTTP_response *HTTP_parse_statusln(char *ptr, struct HTTP_response *result)
-{
-    char *temp, *endptr;
-    // "HTTP"
-    result->protocol = endptr = ptr;
-    if (strncmp(endptr, "HTTP", 4) == 0)
-        endptr += 4;
-    else
-        return NULL;
-    // '/'
-    if (*endptr == '/')
-        endptr++;
-    else
-        return NULL;
-    // DIGIT
-    if (isdigit(*endptr))
-        endptr++;
-    else
-        return NULL;
-    // '.'
-    if (*endptr == '.')
-        endptr++;
-    else
-        return NULL;
-    // DIGIT
-    if (isdigit(*endptr))
-        endptr++;
-    else
-        return NULL;
-    ptr = endptr;
-    // SP
-    if (*ptr == ' ')
-        ptr++;
-    else
-        return NULL;
-    *endptr = '\0';
-    // DIGIT
-    temp = endptr = ptr;
-    if (isdigit(*endptr))
-        endptr++;
-    else
-        return NULL;
-    // DIGIT
-    if (isdigit(*endptr))
-        endptr++;
-    else
-        return NULL;
-    // DIGIT
-    if (isdigit(*endptr))
-        endptr++;
-    else
-        return NULL;
-    ptr = endptr;
-    // SP
-    if (*ptr == ' ')
-        ptr++;
-    else
-        return NULL;
-    *endptr = '\0';
-    result->code = strtous(temp, &endptr, 10);
-    // token
-    result->reason = endptr = ptr;
-    while (istchar(*endptr))
-        endptr++;
-    if (endptr == ptr)
-        return NULL;
-    // CRLF
-    if (iscrlf(endptr))
-        *endptr = '\0';
-    else
-        return NULL;
-    return result;
-}
-
-struct entry *HTTP_parse_fieldln(char *ptr, struct entry *result)
-{
-    char *endptr;
-    // token
-    result->key = endptr = ptr;
-    while (istchar(*endptr))
-        endptr++;
-    if (endptr == ptr)
-        return NULL;
-    ptr = endptr;
-    // ':'
-    if (*ptr == ':')
-        ptr++;
-    else
-        return NULL;
-    *endptr = '\0';
-    // OWS
-    while (iswhitespace(*ptr))
-        ptr++;
-    if (iscrlf(ptr))
+    p = ep;
+    if (HTTP_parse_request_target(ep, &ep, req->target, req->stack) < 0)
     {
-        result->value = NULL;
-        return 0;
+        return -1;
     }
-    // VCHAR / obs-text
-    result->value = endptr = ptr;
-    if (isvchar(*endptr) || isobschar(*endptr))
-        endptr++;
-    else
-        return NULL;
-    // [ 1*( SP / HTAB / field-vchar ) field-vchar ] OWS
-    while (iswhitespace(*endptr) || isvchar(*endptr) || isobschar(*endptr))
-        endptr++;
-    ptr = endptr;
-    endptr--;
-    while (iswhitespace(*endptr))
-        endptr--;
-    endptr++;
-    if (iscrlf(ptr))
-        *endptr = '\0';
-    else
-        return NULL;
-    return result;
+    // SP
+    if (*ep != ' ')
+    {
+        return -1;
+    }
+    *ep = '\0';
+    ep++;
+    // HTTP-version
+    p = ep;
+    if (HTTP_scan_HTTP_version(ep, &ep) < 0)
+    {
+        return -1;
+    }
+    req->version = p;
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
 
-struct chunk *HTTP_parse_chunk_size(char *ptr, struct chunk *result)
+// status-line    = HTTP-version SP status-code SP [ reason-phrase ]
+// status-code    = 3DIGIT
+int HTTP_parse_status_line(char *ptr, char **endptr, struct http_response *res)
 {
-    char *endptr, *k, *v;
-    // chunk-size
-    result->size = strtoul(ptr, &endptr, 16);
-    if (endptr == ptr)
-        return NULL;
-    ptr = endptr;
-    // chunk-extension
-    while (!iscrlf(ptr))
+    char *p, *ep = ptr;
+    // HTTP-version
+    p = ep;
+    if (HTTP_scan_HTTP_version(ep, &ep) < 0)
     {
-        // BWS
-        while (iswhitespace(*ptr))
-            ptr++;
-        // ';'
-        if (*ptr == ';')
-            ptr++;
-        else
-            return NULL;
-        *endptr = '\0';
-        // BWS
-        while (iswhitespace(*ptr))
-            ptr++;
-        // token
-        k = endptr = ptr;
-        while (istchar(*endptr))
-            endptr++;
-        if (endptr == ptr)
-            return NULL;
-        ptr = endptr;
-        if (*ptr == ';' || iscrlf(ptr))
+        return -1;
+    }
+    // SP
+    if (*ep != ' ')
+    {
+        return -1;
+    }
+    *ep = '\0';
+    res->version = p;
+    ep++;
+    // status-code
+    p = ep;
+    // 3DIGIT
+    if (scann(ep, &ep, 3, L_DIGIT, H_DIGIT) < 3)
+    {
+        return -1;
+    }
+    // SP
+    if (*ep != ' ')
+        return -1;
+    *ep = '\0';
+    res->code = strtos(p, NULL, 10);
+    ep++;
+    // [ reason-phrase ]
+    p = ep;
+    if (scan_token(ep, &ep) >= 0)
+    {
+        res->reason = p;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// field-line     = field-name ":" OWS field-value OWS
+// field-name     = token
+// field-value    = *field-content
+// field-content  = field-vchar
+//                  [ 1*( SP / HTAB / field-vchar ) field-vchar ]
+// field-vchar    = VCHAR / obs-text
+int HTTP_parse_field_line(char *ptr, char **endptr, struct entry *f)
+{
+    char *p, *ep = ptr;
+    // field-name
+    p = ep;
+    if (scan_token(ep, &ep) < 0)
+    {
+        return -1;
+    }
+    // ":"
+    if (*ep != ':')
+    {
+        return -1;
+    }
+    *ep = '\0';
+    f->key = p;
+    ep++;
+    // OWS
+    scan_ows(ep, &ep); // field-content
+    p = ep;
+    if (match(*(ep++), L_FIELD_VCHAR, H_FIELD_VCHAR))
+    {
+        // 1*( SP / HTAB / field-vchar )
+        if (scan(ep, &ep, L_FIELD, H_FIELD) > 0)
         {
-            MAP_put(result->extension, k, NULL);
+            // field-vchar
+            while (!match(*(ep - 1), L_FIELD_VCHAR, H_FIELD_VCHAR))
+            {
+                ep--;
+            }
+        }
+        // OWS
+        int n = scan_ows(ep, &ep);
+        if (n >= 0)
+        {
+            if (n > 0)
+            {
+                ep[-n + 1] = '\0';
+            }
+            f->value = p;
+        }
+        else
+        {
+            ep = p;
+        }
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// chunk-ext      = *( BWS ";" BWS chunk-ext-name
+//                     [ BWS "=" BWS chunk-ext-val ] )
+// chunk-ext-name = token
+// chunk-ext-val  = token / quoted-string
+// BWS            = OWS
+int HTTP_parse_chunk_ext(char *ptr, char **endptr, MAP *ext)
+{
+    char *p, *ep = ptr, *k, *v;
+    // *
+    while (1)
+    {
+        p = ep;
+        // (
+        // BWS
+        scan_ows(ep, &ep);
+        // ";"
+        if (*ep != ';')
+        {
+            ep = p;
+            break;
+        }
+        *p = '\0';
+        ep++;
+        // BWS
+        scan_ows(ep, &ep);
+        // chunk-ext-name
+        k = ep;
+        if (scan_token(ep, &ep) < 0)
+        {
+            ep = p;
+            break;
+        }
+        p = ep;
+        // [
+        // BWS
+        if (scan_ows(ep, &ep) > 0)
+        {
+            *p = '\0';
+        }
+        // "="
+        if (*ep != '=')
+        {
+            MAP_put(ext, k, NULL);
+            ep = p;
             continue;
         }
+        *p = '\0';
+        ep++;
         // BWS
-        while (iswhitespace(*ptr))
-            ptr++;
-        // '='
-        if (*ptr == '=')
-            ptr++;
-        else
-            return NULL;
-        *endptr = '\0';
-        // BWS
-        while (iswhitespace(*ptr))
-            ptr++;
-        // token / quoted-string
-        if (*ptr == '"')
+        scan_ows(ep, &ep);
+        // chunk-ext-val
+        if (scan_token(v = ep, &ep) < 0 && parse_qstring(ep, &ep, &v) < 0)
         {
-            // quoted-string
-            if ((v = parse_qstring(ptr, &endptr)) == NULL)
-                return NULL;
+            MAP_put(ext, k, NULL);
+            ep = p;
+            break;
         }
-        else
-        {
-            // token
-            v = endptr = ptr;
-            while (istchar(*endptr))
-                endptr++;
-            if (endptr == ptr)
-                return NULL;
-        }
-        ptr = endptr;
-        MAP_put(result->extension, k, v);
+        MAP_put(ext, k, v);
     }
-    if (iscrlf(ptr))
-        *endptr = '\0';
-    else
-        return NULL;
-    return result;
+    set_endptr(endptr, ep);
+    return ep - ptr;
 }
 
-struct multipart *parse_multipart(char *content, unsigned long content_length, char *boundary, struct multipart *result)
+// chunk          = chunk-size [ chunk-ext ] CRLF
+//                  chunk-data CRLF
+// chunk-size     = 1*HEXDIG
+int HTTP_parse_chunk_head(char *ptr, char **endptr, struct chunk *chunk)
 {
-    struct entry e;
-    struct part part, *temp;
-    char *ptr = content, *endptr, *k;
-    int blen = strlen(boundary);
-    unsigned long len = content_length;
-    result->parts = NULL;
-    result->length = 0;
-    // --boundary
-    while (len > blen + 2)
+    char *p, *ep = ptr, *k, *v;
+    // chunk-size
+    p = ep;
+    chunk->size = strtoull(ep, &ep, 16);
+    if (ep == p)
+        return -1;
+    // chunk-ext
+    HTTP_parse_chunk_ext(ep, &ep, chunk->extension);
+    return ep - ptr;
+}
+
+// bchars = "'" / "(" / ")" /
+//          "+" / "_" / "," / "-" / "." /
+//          "/" / ":" / "=" / "?" / SP
+static const uint64_t L_BCHARS = L_ALPHANUM | 0x8400fb8100000000; // low_mask("'()+_,-./:? ")
+static const uint64_t H_BCHARS = H_ALPHANUM | 0x80000000;         // high_mask("'()+_,-./:? ")
+
+static const uint64_t L_BCHARSNOSPACE = L_BCHARS & ~0x100000000; // low_mask(" ")
+static const uint64_t H_BCHARSNOSPACE = H_BCHARS;
+
+// boundary = 0*69<bchars> bcharsnospace
+int32_t scan_boundary(char *ptr, char **endptr)
+{
+    char *ep = ptr;
+    // 0*69<bchars>
+    scann(ep, &ep, 69, L_BCHARS, H_BCHARS);
+    // bcharsnospace
+    while (ep > ptr && !match(*(ep - 1), L_BCHARSNOSPACE, H_BCHARSNOSPACE))
     {
-        if (strncmp("--", ptr, 2) == 0 && strncmp(boundary, ptr + 2, blen) == 0)
-            break;
-        ptr++;
-        len--;
+        ep--;
     }
-    ptr += blen + 2;
-    len -= blen + 2;
-    if (len < 0)
-        return NULL;
-    while (len > 4 || strncmp("--\r\n", ptr, 4) != 0)
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+int32_t scann_crlf(char *ptr, char **endptr, int32_t n)
+{
+    char *ep = ptr;
+    // Process CRLF
+    if (n < 2 || *ep++ != '\r' || *ep++ != '\n')
     {
-        part.headers = MAP_new_ignore_case();
+        return -1;
+    }
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+//                                             ; (  Octal, Decimal.)
+// text        =  <any CHAR, including bare    ; => atoms, specials,
+//                 CR & bare LF, but NOT       ;  comments and
+//                 including CRLF>             ;  quoted-strings are
+//                                             ;  NOT recognized.
+// CHAR        =  <any ASCII character>        ; (  0-177,  0.-127.)
+int32_t scan_text(char *ptr, char **endptr, int32_t *nptr)
+{
+    int32_t off = 0, n = *nptr, ret;
+    while (((uint8_t)ptr[off]) < 128 && scann_crlf(ptr + off, NULL, n - off) < 0 && off < n)
+    {
+        off++;
+    }
+    *nptr = n;
+    set_endptr(endptr, ptr + off);
+    return off;
+}
+
+// discard-text = *(*text CRLF) *text
+int32_t scan_discard_text(char *ptr, char **endptr, int32_t *nptr)
+{
+    char *ep = ptr;
+    int32_t n = *nptr, ret;
+    // *(*text CRLF)
+    while (scan_text(ep, &ep, &n) > 0)
+    {
         // CRLF
-        if (len >= 2 && iscrlf(ptr))
+        if ((ret = scann_crlf(ep, &ep, n)) < 0)
         {
-            ptr += 2;
-            len -= 2;
+            return -1;
         }
-        else
-            return NULL;
-        // headers
-        while (!iscrlf(ptr))
+        n -= ret;
+    }
+    scan_text(ep, &ep, &n);
+    *nptr = n;
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// transport-padding = *LWSP-char
+//                     ; Composers MUST NOT generate
+//                     ; non-zero length transport
+//                     ; padding, but receivers MUST
+//                     ; be able to handle padding
+//                     ; added by message transports.
+int32_t scan_transport_padding(char *ptr, char **endptr, int32_t *nptr)
+{
+    int32_t ret;
+    ret = scann(ptr, endptr, *nptr, L_LWSP_CHAR, H_LWSP_CHAR);
+    *nptr -= ret;
+    return ret;
+}
+
+// dash-boundary = "--" boundary
+int32_t scan_dash_boundary(char *ptr, char **endptr, int32_t *nptr, char *boundary)
+{
+    char *ep = ptr;
+    int32_t n = *nptr, ret;
+    // "--"
+    if ((ret = scann_str(ep, &ep, n, "--")) < 0)
+    {
+        return -1;
+    }
+    n -= ret;
+    // boundary
+    if ((ret = scann_str(ep, &ep, n, boundary)) < 0)
+    {
+        return -1;
+    }
+    n -= ret;
+    *nptr = n;
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// delimiter = CRLF dash-boundary
+int32_t scan_delimiter(char *ptr, char **endptr, int32_t *nptr, char *boundary)
+{
+    char *ep = ptr;
+    int32_t n = *nptr, ret;
+    // CRLF
+    if ((ret = scann_crlf(ep, &ep, n)) < 0)
+    {
+        return -1;
+    }
+    n -= ret;
+    // dash-boundary
+    if (scan_dash_boundary(ep, &ep, &n, boundary) < 0)
+    {
+        return -1;
+    }
+    *nptr = n;
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// dash-boundary transport-padding CRLF
+int32_t scan_first_boundary_line(char *ptr, char **endptr, int32_t *nptr, char *boundary)
+{
+    char *ep = ptr;
+    int32_t n = *nptr, ret;
+    // dash-boundary transport-padding CRLF
+    if (scan_dash_boundary(ep, &ep, &n, boundary) < 0 || scan_transport_padding(ep, &ep, &n) < 0 || (ret = scann_crlf(ep, &ep, n)) < 0)
+    {
+        return -1;
+    }
+    n -= ret;
+    *nptr = n;
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+// multipart-body  = [preamble CRLF]
+//                   dash-boundary transport-padding CRLF
+//                   body-part *encapsulation
+//                   close-delimiter transport-padding
+//                   [CRLF epilogue]
+// dash-boundary   = "--" boundary
+//                   ; boundary taken from the value of
+//                   ; boundary parameter of the
+//                   ; Content-Type field.
+// preamble        = discard-text
+// epilogue        = discard-text
+// discard-text    = *(*text CRLF) *text
+//                   ; May be ignored or discarded.
+// body-part       = MIME-part-headers [CRLF *OCTET]
+// OCTET           = <any 0-255 octet value>
+// encapsulation   = delimiter transport-padding
+//                   CRLF body-part
+// delimiter       = CRLF dash-boundary
+// close-delimiter = delimiter "--"
+bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipart *mp)
+{
+    bool done = false;
+    char c, *p, *ep = ptr, *v;
+    struct entry e;
+    struct part *part, **parts = NULL, **temp;
+    // only the actual body part can exceed INT32_MAX
+    int32_t ret, smax = INT32_MAX > n ? n : INT32_MAX, srem = smax;
+    uint32_t length = 0;
+    uint64_t rem = n;
+    // Validate boundary
+    if (scan_boundary(boundary, &p) < 0 || *p)
+    {
+        return false;
+    }
+    // [preamble CRLF] dash-boundary transport-padding CRLF
+    while (scan_first_boundary_line(ep, &ep, &srem, boundary) < 0)
+    {
+        // *text
+        if (scan_text(ep, &ep, &srem) < 0)
         {
-            // valid line
-            endptr = ptr;
-            while (len >= 2 && !iscrlf(endptr))
-            {
-                endptr++;
-                len--;
-            }
-            endptr += 2;
-            len -= 2;
-            if (len < 0)
-                return NULL;
-            // field line
-            if (HTTP_parse_fieldln(ptr, &e) == NULL)
-                return NULL;
-            if ((k = MAP_get(part.headers, e.key)) != NULL && e.value != NULL)
-            {
-                k = buffcat(k, strlen(k), ", ", 3);
-                e.key = buffcat(k, strlen(k), e.key, strlen(e.key) + 1);
-                free(k);
-                STACK_push(result->stack, e.key);
-            }
-            MAP_put(part.headers, e.key, e.value);
-            ptr = endptr;
+            return false;
         }
         // CRLF
-        ptr += 2;
-        len -= 2;
-        if (len < 0)
-            return NULL;
-        part.content = ptr;
-        part.content_length = 0;
-        // --boundary CRLF
-        while (len > blen + 4)
+        if ((ret = scann_crlf(ep, &ep, srem)) < 0)
         {
-            if (strncmp("\r\n--", ptr, 4) == 0 && strncmp(boundary, ptr + 4, blen) == 0)
-                break;
-            ptr++;
-            len--;
-            part.content_length++;
+            return false;
         }
-        // append the new part
-        result->length++;
-        temp = result->parts;
-        result->parts = malloc(sizeof(struct part) * result->length);
+        srem -= ret;
+    }
+    rem -= smax - srem;
+    // scan each body part
+    while (!done)
+    {
+        part = malloc(sizeof(part));
+        part->headers = MAP_new_ignore_case();
+        part->content = NULL;
+        part->content_length = 0;
+        // Temporarily terminate the buffer with a null terminator so that parseln doesn't index out of it
+        c = ep[rem - 1];
+        ep[rem - 1] = '\0';
+        // MIME-part-headers
+        while ((ret = HTTP_parseln(ep, (parser_t *)&HTTP_parse_field_line, &e)) >= 0)
+        {
+            ep += ret;
+            rem -= ret;
+            if ((v = MAP_get(part->headers, e.key)) != NULL && e.value != NULL)
+            {
+                // delimit duplicate fields by "," characters
+                v = buffcat(v, strlen(v), ", ", 3);
+                e.key = buffcat(v, strlen(v), e.value, strlen(e.value) + 1);
+                free(v);
+                STACK_push(mp->stack, e.key);
+            }
+            MAP_put(part->headers, e.key, e.value);
+        }
+        ep[rem - 1] = c;
+        srem = smax = INT32_MAX > rem ? rem : INT32_MAX;
+        // [CRLF *OCTET] *encapsulation close-delimiter
+        if (scan_delimiter(ep, &ep, &srem, boundary) < 0)
+        {
+            // If the boundary doesn't immediately follow the headers, then there must be a body
+            // which must be preceeded by a CRLF
+            if ((ret = scann_crlf(ep, &ep, srem)) < 0)
+            {
+                MAP_free(part->headers);
+                free(part);
+                if (parts != NULL)
+                {
+                    free(parts);
+                }
+                return false;
+            }
+            srem -= ret;
+            p = ep;
+            rem -= smax - srem;
+            srem = smax = INT32_MAX > rem ? rem : INT32_MAX;
+            // Parse every byte until the next delimiter
+            while (scan_delimiter(ep, &ep, &srem, boundary) < 0)
+            {
+                if (rem == 0)
+                {
+                    MAP_free(part->headers);
+                    free(part);
+                    if (parts != NULL)
+                    {
+                        free(parts);
+                    }
+                    return false;
+                }
+                ep++;
+                rem--;
+                srem = smax = INT32_MAX > rem ? rem : INT32_MAX;
+            }
+            part->content = p;
+            part->content_length = ep - p;
+        }
+        rem -= smax - srem;
+        srem = smax = INT32_MAX > rem ? rem : INT32_MAX;
+        // Check if the delimiter is a close-delimiter
+        if ((ret = scann_str(ep, &ep, srem, "--")) >= 0)
+        {
+            srem -= ret;
+            done = true;
+        }
+        // transport-padding
+        if (scan_transport_padding(ep, &ep, &srem) < 0)
+        {
+            MAP_free(part->headers);
+            free(part);
+            if (parts != NULL)
+            {
+                free(parts);
+            }
+            return false;
+        }
+        if (!done)
+        {
+            // If the delimiter wasn't closing, then there must be a CRLF before the next body-part
+            if ((ret = scann_crlf(ep, &ep, srem)) < 0)
+            {
+                MAP_free(part->headers);
+                free(part);
+                if (parts != NULL)
+                {
+                    free(parts);
+                }
+                return false;
+            }
+            srem -= ret;
+        }
+        part->content = p;
+        rem -= smax - srem;
+        length++;
+        // Allocate memory for the new part in the array
+        temp = parts;
+        parts = malloc(sizeof(struct part *) * length);
+        memcpy(parts, temp, sizeof(struct part *) * (length - 1));
+        parts[length - 1] = part;
         if (temp != NULL)
         {
-            memcpy(result->parts, temp, sizeof(struct part) * result->length - 1);
             free(temp);
         }
-        result->parts[result->length - 1] = part;
-        // next --boundary
-        while (len > blen + 2)
-        {
-            if (strncmp("\r\n--", ptr, 4) == 0 && strncmp(boundary, ptr + 4, blen) == 0)
-                break;
-            ptr++;
-            len--;
-        }
-        ptr += blen + 4;
-        len -= blen + 4;
-        if (len < 0)
-            return NULL;
     }
-    STACK_push(result->stack, result->parts);
-    if (len < 4)
-        return NULL;
-    return result;
+    srem = smax = INT32_MAX > rem ? rem : INT32_MAX;
+    // [CRLF epilogue]
+    if ((ret = scann_crlf(ep, &ep, srem)) >= 0)
+    {
+        srem -= ret;
+        if (scan_discard_text(ep, &ep, &srem) < 0)
+        {
+            return false;
+        }
+        rem -= smax - srem;
+    }
+    mp->parts = parts;
+    mp->length = length;
+    STACK_push(mp->stack, parts);
+    return rem == 0;
 }
 
 /*
@@ -1431,130 +1567,191 @@ struct multipart *parse_multipart(char *content, unsigned long content_length, c
  * -----------------
  */
 
-__thread char buffer[65535];
-__thread unsigned short buffer_pos = 0;
-__thread unsigned short buffer_size = 0;
+/// @brief The thread specific buffer
+__thread char buffer[BUFFER_SIZE];
 
+/// @brief The index of the next unread character in the buffer
+__thread uint16_t buffer_pos = 0;
+
+/// @brief The total size of the data read to the buffer
+__thread uint16_t buffer_size = 0;
+
+/// @brief Receives up to N bytes from the socket FD and places them into the buffer.
+/// Ensures that data is read from the global buffer if applicable before receiving new data.
+/// @param fd The socket file descriptor
+/// @param buf The buffer
+/// @param n The maximum number of bytes to read
+/// @param flags Flags for `recv`
+/// @return The number of bytes read
 ssize_t recv_r(int fd, void *buf, size_t n, int flags)
 {
-    unsigned long len = buffer_size - buffer_pos;
+    uint64_t len = buffer_size - buffer_pos;
     if (len >= n)
     {
+        // The size of the data in the buffer is larger than N, so copy N bytes from the buffer
         memcpy(buf, buffer + buffer_pos, n);
         buffer_pos += n;
         return n;
     }
+    // Copy the remainder of the buffer
     memcpy(buf, buffer + buffer_pos, len);
     buffer_pos += len;
+    // Receive the rest of the data up to N bytes
     ssize_t ret = recv(fd, buf + len, n - len, flags);
     if (ret < 0)
+    {
         return ret;
+    }
     else
+    {
         return ret + len;
+    }
 }
 
-long recv_line(int fd, char **ptr)
+/// @brief Receives an sequence of characters until a CRLF over a file socket FD.
+/// @param fd The socket file descriptor
+/// @param ptr Pointer where the result will be placed into
+/// @return The size of the line ending in a CRLF
+int32_t recvln(int fd, char **ptr)
 {
-    char done = 0, *temp, *data = *ptr = NULL;
-    unsigned short n, i;
-    long size = 0;
+    bool done = false;
+    char *temp, *data = *ptr = NULL;
+    uint16_t i = buffer_pos, n = buffer_size;
+    int32_t size = 0;
     while (!done)
     {
-        // if the size is greater than the max size
         if (size > MAX_LINE_SIZE)
         {
-            // free data and return -2
+            // Size is too large, so free the data and return -2
             if (data != NULL)
                 free(data);
             return -2;
         }
-        // if the buffer postion is past the size of the buffer
-        if (buffer_pos >= buffer_size)
+        if (i >= n)
         {
-            // receive new data
-            if ((n = recv(fd, buffer, sizeof(buffer), 0)) < 0)
+            // Position is past the end of the buffer, so receive new data
+            if ((n = recv(fd, buffer, BUFFER_SIZE, 0)) < 0)
             {
                 if (data != NULL)
+                {
                     free(data);
+                }
                 return -1;
             }
-            // if we recieved 0 bytes
             if (n == 0)
             {
+                // 0 bytes were read, so return -3 to indicate a closed connection
                 if (data != NULL)
+                {
                     free(data);
-                // return -3 indicating the connection was closed
+                }
                 return -3;
             }
-            // buffer position is 0
-            buffer_pos = 0;
-            // buffer size is the returned size
+            // Set buffer position and size to correspond the received data
+            buffer_pos = i = 0;
             buffer_size = n;
         }
-        // if the first character in the buffer and the last character of data make a crlf
-        if (buffer_pos == 0 && size > 0 && data[size - 1] == '\r' && buffer[0] == '\n')
-            done = 1;
-        // search for crlf in the buffer
-        for (i = buffer_pos; i < buffer_size; i++)
+        if (i == 0 && size >= 1 && data[size - 1] == '\r' && buffer[0] == '\n')
         {
-            if (i > 0 && buffer[i - 1] == '\r' && buffer[i] == '\n')
+            // The last character from the data and first character from the buffer make a CRLF, so mark the loop as done
+            done = true;
+        }
+        // Search for the CRLF in the buffer
+        while (!done && i < n - 1)
+        {
+            char *ptr = buffer + i;
+            if (scan_crlf(buffer + i, NULL) >= 0)
             {
-                done = 1;
-                break;
+                done = true;
             }
+            i++;
         }
-        // if we reached the end of the buffer
-        if (i == sizeof(buffer) - 1)
+        i++;
+        // Concatenate the buffer to the data
+        temp = data;
+        data = buffcat(data, size, buffer + buffer_pos, i - buffer_pos);
+        if (temp != NULL)
         {
-            // concatenate data and buffer
-            temp = data;
-            data = buffcat(data, size, buffer + buffer_pos, sizeof(buffer) - buffer_pos);
-            if (temp != NULL)
-                free(temp);
-            // add buffer size - buffer position to the size
-            size += sizeof(buffer) - buffer_pos;
+            free(temp);
         }
-        else
-        {
-            temp = data;
-            data = buffcat(data, size, buffer + buffer_pos, i + 1 - buffer_pos);
-            if (temp != NULL)
-                free(temp);
-            // add read size to size
-            size += i + 1 - buffer_pos;
-        }
-        // buffer position is i + 1
-        buffer_pos = i + 1;
+        // Add read size to data size
+        size += i - buffer_pos;
+        buffer_pos = i;
     }
     *ptr = data;
-    return size - 2;
+    return size;
 }
 
-struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
+int32_t HTTP_recvln(int fd, parser_t *parser, void *result, uint8_t *flags, STACK *stack, bool allow_empty)
 {
-    char *data, *temp, *k;
-    unsigned short size = 65535;
-    long ret;
-    unsigned long bytes;
-    struct entry e;
-    struct chunk chunk;
-    ret = recv_line(fd, &data);
+    char *ptr;
+    int32_t ret = recvln(fd, &ptr);
     if (ret < 0)
     {
         if (ret == -1)
-            result->flags = CONNECTION_ERROR;
-        if (ret == -2)
-            result->flags = CONTENT_TOO_LARGE;
-        if (ret == -3)
-            result->flags = CONNECTION_CLOSED;
-        return NULL;
+        {
+            *flags |= CONNECTION_ERROR;
+        }
+        else if (ret == -2)
+        {
+            *flags |= CONTENT_TOO_LARGE;
+        }
+        else if (ret == -3)
+        {
+            *flags |= CONNECTION_CLOSED;
+        }
+        return -1;
     }
-    STACK_push(result->stack, data);
+    STACK_push(stack, ptr);
+    if (ret == 2 && allow_empty)
+    {
+        return 2;
+    }
+    ret = HTTP_parseln(ptr, parser, result);
+    if (ret < 0)
+    {
+        *flags |= PARSE_ERROR;
+        return -1;
+    }
+    return ret;
+}
+
+bool HTTP_recvln_empty(int fd, uint8_t *flags)
+{
+    char *ptr;
+    int32_t ret = recvln(fd, &ptr);
+    if (ret < 0)
+    {
+        if (ret == -1)
+        {
+            *flags |= CONNECTION_ERROR;
+        }
+        else if (ret == -2)
+        {
+            *flags |= CONTENT_TOO_LARGE;
+        }
+        else if (ret == -3)
+        {
+            *flags |= CONNECTION_CLOSED;
+        }
+        return -1;
+    }
+    free(ptr);
+    return ret == 2;
+}
+
+struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
+{
+    char *data, *temp, *v;
+    uint16_t size = BUFFER_SIZE;
+    ssize_t ret;
+    uint64_t bytes;
+    struct entry e;
+    struct chunk chunk;
     chunk.extension = MAP_new();
-    if (HTTP_parse_chunk_size(data, &chunk) == NULL)
+    if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_chunk_head, &chunk, &result->flags, result->stack, false) < 0)
     {
         MAP_free(chunk.extension);
-        result->flags = PARSE_ERROR;
         return NULL;
     }
     while (chunk.size > 0)
@@ -1568,23 +1765,15 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
             {
                 MAP_free(chunk.extension);
                 free(chunk.content);
-                result->flags = CONNECTION_ERROR;
+                result->flags |= CONNECTION_ERROR;
                 return NULL;
             }
             bytes += ret;
         }
-        ret = recv_line(fd, &data);
-        free(data);
-        if (ret != 0)
+        if (!HTTP_recvln_empty(fd, &result->flags))
         {
             MAP_free(chunk.extension);
             free(chunk.content);
-            if (ret == -1)
-                result->flags = CONNECTION_ERROR;
-            if (ret == -2)
-                result->flags = CONTENT_TOO_LARGE;
-            if (ret == -3)
-                result->flags = CONNECTION_CLOSED;
             return NULL;
         }
         temp = result->content;
@@ -1594,63 +1783,39 @@ struct HTTP_request *recv_chunks(int fd, struct HTTP_request *result)
             free(temp);
         result->content_length += chunk.size;
         MAP_free(chunk.extension); // discard chunk extension
-        ret = recv_line(fd, &data);
-        if (ret < 0)
-        {
-            if (ret == -1)
-                result->flags = CONNECTION_ERROR;
-            if (ret == -2)
-                result->flags = CONTENT_TOO_LARGE;
-            if (ret == -3)
-                result->flags = CONNECTION_CLOSED;
-            return NULL;
-        }
-        STACK_push(result->stack, data);
         chunk.extension = MAP_new();
-        if (HTTP_parse_chunk_size(data, &chunk) == NULL)
+        if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_chunk_head, &chunk, &result->flags, result->stack, false) < 0)
         {
             MAP_free(chunk.extension);
-            result->flags = PARSE_ERROR;
             return NULL;
         }
     }
     STACK_push(result->stack, result->content);
     while (1)
     {
-        size = recv_line(fd, &data);
-        if (size < 0)
+        // field-lines
+        if ((ret = HTTP_recvln(fd, (parser_t *)&HTTP_parse_field_line, &e, &result->flags, result->stack, true)) < 0)
         {
-            STACK_free(result->stack);
-            if (size == -1)
-                result->flags = CONNECTION_ERROR;
-            if (size == -2)
-                result->flags = CONTENT_TOO_LARGE;
-            if (size == -3)
-                result->flags = CONNECTION_CLOSED;
             return NULL;
         }
-        STACK_push(result->stack, data);
-        if (size == 0)
+        if (ret == 2)
+        {
             break;
-        /* field-lines */
-        if (HTTP_parse_fieldln(data, &e) == NULL)
-        {
-            result->flags = PARSE_ERROR;
-            return NULL;
         }
-        if ((k = MAP_get(result->trailers, e.key)) != NULL && e.value != NULL)
+        if ((v = MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
         {
-            k = buffcat(k, strlen(k), ", ", 3);
-            e.key = buffcat(k, strlen(k), e.key, strlen(e.key) + 1);
-            free(k);
-            STACK_push(result->stack, e.key);
+            // delimit duplicate headers by ","
+            v = buffcat(v, strlen(v), ", ", 3);
+            e.value = buffcat(v, strlen(v), e.value, strlen(e.value) + 1);
+            free(v);
+            STACK_push(result->stack, e.value);
         }
         MAP_put(result->trailers, e.key, e.value);
     }
     return result;
 }
 
-long HTTP_send_response(HTTP_response *res, int fd, char head)
+ssize_t HTTP_send_response(struct http_response *res, int fd, bool head)
 {
     MAP_put_if_absent(res->headers, "Connection", "close");
     if (!MAP_contains_key(res->headers, "Date"))
@@ -1673,27 +1838,47 @@ long HTTP_send_response(HTTP_response *res, int fd, char head)
         sprintf(content_length, "%lu", res->content_length);
         MAP_put(res->headers, "Content-Length", content_length);
     }
-    long size = HTTP_ressize(res, head);
-    char *msg = malloc(size);
-    HTTP_resmsg_ex(res, head, msg);
-    unsigned long written = send(fd, msg, size, MSG_NOSIGNAL);
-    free(msg);
+    uint8_t *s;
+    uint64_t size = HTTP_resmsg_ex(res, head, &s);
+    ssize_t written = send(fd, s, size, MSG_NOSIGNAL);
+    free(s);
     return written;
 }
 
-void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd)
+void HTTP_respond_file(struct http_request *req, char *path, struct http_response *res, int fd)
 {
     MAP_put(res->headers, "Accept-Ranges", "bytes");
     MAP_put_if_absent(res->headers, "Cache-Control", "no-cache");
     FILE *fp = fopen(path, "r");
     fseek(fp, 0L, SEEK_END);
-    unsigned long size = ftell(fp); /* file size */
+    uint64_t size = ftell(fp); /* file size */
     char *rangeh = MAP_get(req->headers, "Range");
     if (rangeh != NULL)
-    { /* range was specified */
-        unsigned long range[2];
-        parse_range(rangeh, size, range);
-        if (range == NULL || range[0] < 0 || range[0] >= size || range[0] > range[1])
+    {
+        // Range was specified
+        bool bad_range = false;
+        char *endptr;
+        struct range range;
+        RANGE_init(&range);
+        struct int_range spec = {0, 0};
+        // Parse range
+        if (HTTP_parse_range(rangeh, &endptr, &range) < 0 || *endptr != '\0')
+        {
+            bad_range = true;
+        }
+        // TODO: Handle multiple ranges
+        // Parse specifier
+        if (strcmp(range.units, "bytes") != 0 || range.length > 1 || HTTP_parse_int_range(range.set[0], &endptr, size, &spec) < 0 || *endptr != '\0')
+        {
+            bad_range = true;
+        }
+        RANGE_free(&range);
+        // Validate range
+        if (spec.first < 0 || spec.last >= size || spec.first > spec.last)
+        {
+            bad_range = true;
+        }
+        if (bad_range)
         {
             res->code = 416; /* Range Not Satisfiable */
             res->reason = HTTP_reason(res->code);
@@ -1702,27 +1887,25 @@ void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd
             *content_range = '\0';
             sprintf(content_range, "bytes */%ld", size);
             MAP_put(res->headers, "Content-Range", content_range);
-            HTTP_send_response(res, fd, 0);
+            HTTP_send_response(res, fd, false);
         }
         else
         {
-            if (range[1] > size - 1) /* last pos is capped at size - 1 */
-                range[1] = size - 1;
             res->code = 206; /* Partial Content */
             res->reason = HTTP_reason(res->code);
             /* content-range */
-            char *content_range = malloc(numlenul(range[0]) + numlenul(range[1]) + numlenul(size) + 9);
+            char *content_range = malloc(numlenul(spec.first) + numlenul(spec.last) + numlenul(size) + 9);
             STACK_push(res->stack, content_range);
             *content_range = '\0';
-            sprintf(content_range, "bytes %ld-%ld/%ld", range[0], range[1], size);
+            sprintf(content_range, "bytes %ld-%ld/%ld", spec.first, spec.last, size);
             MAP_put(res->headers, "Content-Range", content_range);
             /* size */
-            size = range[1] - range[0] + 1;
+            size = spec.last - spec.first + 1;
             res->content_length = size;
-            HTTP_send_response(res, fd, 1);
+            HTTP_send_response(res, fd, true);
             if (strcmp(req->method, "HEAD") != 0)
                 /* body */
-                send_file(fd, fp, range[0], range[1]);
+                send_file(fd, fp, spec.first, spec.last);
         }
     }
     else
@@ -1730,7 +1913,7 @@ void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd
 
         res->reason = HTTP_reason(res->code);
         res->content_length = size;
-        HTTP_send_response(res, fd, 1);
+        HTTP_send_response(res, fd, true);
         /* body */
         if (strcmp(req->method, "HEAD") != 0)
             send_file(fd, fp, 0, size - 1);
@@ -1738,62 +1921,39 @@ void HTTP_respond_file(HTTP_request *req, char *path, HTTP_response *res, int fd
     fclose(fp);
 }
 
-HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
+struct http_request *HTTP_recvreq(int fd, struct http_request *result)
 {
-    char *data = NULL, *temp, *k, *v;
-    long i = 0, ret;
+    char *data = NULL, *temp, *ep, *v;
+    int32_t ret;
     struct entry e;
     result->method = NULL;
-    result->protocol = NULL;
-    ret = recv_line(fd, &data);
-    if (ret < 0)
+    result->version = NULL;
+    if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_request_line, result, &result->flags, result->stack, false) < 0)
     {
-        if (ret == -1)
-            result->flags |= CONNECTION_ERROR;
-        if (ret == -2)
-            result->flags |= CONTENT_TOO_LARGE;
-        if (ret == -3)
-            result->flags |= CONNECTION_CLOSED;
-        return NULL;
-    }
-    STACK_push(result->stack, data);
-    if (HTTP_parse_reqln(data, result) == NULL)
-    {
-        result->flags |= PARSE_ERROR;
         return NULL;
     }
     while (1)
     {
-        ret = recv_line(fd, &data);
-        if (ret < 0)
+        // field-lines
+        if ((ret = HTTP_recvln(fd, (parser_t *)&HTTP_parse_field_line, &e, &result->flags, result->stack, true)) < 0)
         {
-            if (ret == -1)
-                result->flags |= CONNECTION_ERROR;
-            if (ret == -2)
-                result->flags |= CONTENT_TOO_LARGE;
-            if (ret == -3)
-                result->flags |= CONNECTION_CLOSED;
             return NULL;
         }
-        STACK_push(result->stack, data);
-        if (ret == 0)
+        if (ret == 2)
+        {
             break;
-        /* field-lines */
-        if (HTTP_parse_fieldln(data, &e) == NULL)
-        {
-            result->flags |= PARSE_ERROR;
-            return NULL;
         }
-        if ((k = MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
+        if ((v = MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
         {
-            k = buffcat(k, strlen(k), ", ", 3);
-            e.key = buffcat(k, strlen(k), e.key, strlen(e.key) + 1);
-            free(k);
-            STACK_push(result->stack, e.key);
+            // delimit duplicate headers by ","
+            v = buffcat(v, strlen(v), ", ", 3);
+            e.value = buffcat(v, strlen(v), e.value, strlen(e.value) + 1);
+            free(v);
+            STACK_push(result->stack, e.value);
         }
         MAP_put(result->headers, e.key, e.value);
     }
-    /* message body */
+    // message body
     if ((v = MAP_get(result->headers, "Transfer-Encoding")) != NULL && *v != '\0')
     {
         int len = 1;
@@ -1820,18 +1980,18 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
         }
         for (i = 0; i < len; i++)
             if (strcasecmp(encodings[i], "chunked") == 0)
-                recv_chunks(fd, result);
+                HTTP_recv_chunks(fd, result);
     }
     else if (MAP_contains_key(result->headers, "Content-Length"))
     {
         char *ptr, *endptr;
-        unsigned long content_length = strtoul(ptr = MAP_get(result->headers, "Content-Length"), &endptr, 10);
+        uint64_t content_length = strtoull(ptr = MAP_get(result->headers, "Content-Length"), &endptr, 10);
         if (*ptr == '\0' || *endptr != '\0')
         {
             result->flags |= BAD_CONTENT_LENGTH;
             return NULL;
         }
-        if (content_length > 8UL * (1 << 30)) // 8 GB limit
+        if (content_length > 0x200000000) // 8 GB limit
         {
             /*
              * NOTE: if we don't read the request to completion, the client will likely not receive the response
@@ -1842,8 +2002,8 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
             return NULL;
         }
         result->content = malloc(content_length);
-        unsigned short size = 65535;
-        unsigned long bytes = 0;
+        uint16_t size = BUFFER_SIZE;
+        uint64_t bytes = 0;
         while (bytes < content_length)
         {
             ret = recv_r(fd, result->content + bytes, bytes + size > content_length ? content_length - bytes : size, 0);
@@ -1860,44 +2020,3 @@ HTTP_request *HTTP_readreq_ex(int fd, HTTP_request *result)
     }
     return result;
 }
-//
-// int main(int argc, char **argv)
-// {
-//     struct uri uri;
-//     char *endptr;
-//     char *str = malloc(100);
-//     strcpy(str, "https://admin:awww@.google.com:8000/watch?uri=https://www.youtube.com?v=1%26b=");
-//     printf("%s\n", str);
-//     struct uri *result = HTTP_parse_target(str, &endptr, &uri, STACK_new());
-//     if (result != NULL)
-//     {
-//         int len = endptr - str;
-//         char buf[len + 1];
-//         memset(buf, ' ', len);
-//         buf[len] = '\0';
-//         printf("%s^\n", buf);
-//         printf("protocol=%s\nhost=%s\npath=%s\nquery=", uri.protocol, uri.host, uri.path);
-//         if (MAP_size(uri.query) > 0)
-//         {
-//             printf("{ ");
-//             for (int i = 0; i < MAP_size(uri.query); i++)
-//             {
-//                 if (i > 0)
-//                 {
-//                     printf(", ");
-//                 }
-//                 printf("\"%s\"=\"%s\"", MAP_entry_set(uri.query)[i]->key, (char *)MAP_entry_set(uri.query)[i]->value);
-//             }
-//             printf(" }");
-//         }
-//         else
-//         {
-//             printf("{}");
-//         }
-//         printf("\n");
-//     }
-//     else
-//     {
-//         printf("bad URI");
-//     }
-// }

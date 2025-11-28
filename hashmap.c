@@ -1,5 +1,4 @@
 #include <stdlib.h>
-#include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
 #include "utils.h"
@@ -29,7 +28,7 @@ typedef struct hashmap_s
     struct entry **entry_set;
     char **key_set;
     void **values;
-    struct node_s **table;
+    NODE **table;
     int capacity;
     int size;
     int threshold;
@@ -52,7 +51,7 @@ int table_size_for(int cap)
                                                  : n + 1;
 }
 
-NODE *NODE_new(int hash, char *key, void *value, NODE *next)
+NODE *MAP_NODE_new(int hash, char *key, void *value, NODE *next)
 {
     NODE *node = malloc(sizeof(NODE));
     node->hash = hash;
@@ -302,7 +301,7 @@ void *MAP_put_val(MAP *map, int hash, char *key, void *value, bool only_if_absen
     }
     if ((p = tab[i = (n - 1) & hash]) == NULL)
     {
-        tab[i] = NODE_new(hash, key, value, NULL);
+        tab[i] = MAP_NODE_new(hash, key, value, NULL);
     }
     else
     {
@@ -316,7 +315,7 @@ void *MAP_put_val(MAP *map, int hash, char *key, void *value, bool only_if_absen
             {
                 if ((e = p->next) == NULL)
                 {
-                    p->next = NODE_new(hash, key, value, NULL);
+                    p->next = MAP_NODE_new(hash, key, value, NULL);
                     break;
                 }
                 if (e->hash == hash && ((k = e->key) == key || (key != NULL && (map->ignore_case ? strcasecmp(key, k) : strcmp(key, k)) == 0)))
