@@ -1,6 +1,6 @@
 RM = rm
 CC = gcc
-INPUT = hashmap.c utils.c http.c server.c
+INPUT = utils.c hashmap.c uri.c http.c server.c
 OUTPUT = server
 
 build:
