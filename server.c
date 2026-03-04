@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <fcntl.h>
@@ -280,7 +281,7 @@ void *thread_main(void *arg)
     return NULL;
 }
 
-char init(unsigned short port, int n)
+bool init(unsigned short port, int n)
 {
     int sockfd, connfd, len, i;
     struct sockaddr_in server, client;
@@ -292,7 +293,7 @@ char init(unsigned short port, int n)
     if (sockfd == -1)
     {
         printf("socket creation failed\n");
-        return 0;
+        return false;
     }
     bzero(&server, sizeof(server));
 
@@ -305,16 +306,16 @@ char init(unsigned short port, int n)
     if ((bind(sockfd, (struct sockaddr *)&server, sizeof(server))) < 0)
     {
         printf("socket bind failed\n");
-        return 0;
+        return false;
     }
     printf("listening on port %d\n", port);
-    while (1)
+    while (true)
     {
         /* listen on socket */
         if ((listen(sockfd, n)) < 0)
             printf("listen failed\n");
         len = sizeof(client);
-        while (1)
+        while (true)
         {
             /* accept new connections */
             if ((connfd = accept(sockfd, (struct sockaddr *)&client, &len)) < 0)
@@ -327,40 +328,52 @@ char init(unsigned short port, int n)
     }
     close(sockfd);
     printf("socket closed\n");
+    return true;
 }
 
 int main(int argc, char **argv)
 {
-    char *ptr, *endptr;
     unsigned short port = PORT;
-    int sockfd, connfd, len, i, j = 0;
-    struct sockaddr_in server, client;
 
-    for (i = 1; i < argc; i++)
+    for (int i = 1, j = 0; i < argc; i++)
     {
-        ptr = argv[i];
+        char *ptr = argv[i];
         if (*ptr == '-')
         {
-            if (strcmp(ptr, "--debug") == 0)
+            char c = ptr[1];
+            if (isalnum(c))
             {
-                debug = true;
-            }
-            else
-            {
-                printf("unrecognized flag: %s\n", ptr);
+                fprintf(stderr, "invalid option -- '%c'\n", c);
                 return 1;
+            }
+            else if (c == '-')
+            {
+                if (strcmp(ptr + 2, "debug") == 0)
+                {
+                    debug = true;
+                }
+                else
+                {
+                    fprintf(stderr, "unrecognized option '%s'\n", ptr);
+                    return 1;
+                }
             }
         }
         else if (j == 0)
         {
-            endptr = NULL;
+            char *endptr = NULL;
             port = strtous(ptr, &endptr, 10);
             if (*ptr == '\0' || *endptr != '\0')
             {
-                printf("invalid port: %s\n", ptr);
+                fprintf(stderr, "invalid port '%s'\n", ptr);
                 return 1;
             }
             j++;
+        }
+        else
+        {
+            fprintf(stderr, "too many arguments");
+            return 1;
         }
     }
     /* set handlers */

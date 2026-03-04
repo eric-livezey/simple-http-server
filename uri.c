@@ -343,7 +343,7 @@ int scan_dec_octet(char *ptr, char **endptr)
     }
     if (ptr == ep)
     {
-        // The string is empty, so return null
+        // The string is empty, so return -1
         return -1;
     }
     set_endptr(endptr, ep);
@@ -385,21 +385,22 @@ int scan_ipv4_address(char *ptr, char **endptr)
 //               / [ *4( h16 ":" ) h16 ] "::"              ls32
 //               / [ *5( h16 ":" ) h16 ] "::"              h16
 //               / [ *6( h16 ":" ) h16 ] "::"
+// The unusually long abnf is just to account for the short form
+// :: is valid
+// FFFF::FF is valid
+// ::FFFF::FFFF is ambigous so invalid
+// FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF is valid
+// FF::FFFF:FFFF:FFFF:FFFF:255.255.255.255 is valid
+// Essentially up to 8 segments with no more than one short form
+// Then the last two segments can be an ipv4
 int scan_ipv6_address(char *ptr, char **endptr)
 {
-    // The unusually long abnf is just to account for the short form
-    // :: is valid
-    // FFFF::FF is valid
-    // ::FFFF::FFFF is ambigous so invalid
-    // FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF is valid
-    // FF::FFFF:FFFF:FFFF:FFFF:255.255.255.255 is valid
-    // Essentially up to 8 segments with no more than one short form
-    // Then the last two segments can be an ipv4
+    
     char *ep = ptr, n = 0;
     bool short_form = false, seg = true;
     while (n < 8)
     {
-        if (seg && (n == 6 || short_form && n < 6) && scan_ipv4_address(ep, &ep) >= 0)
+        if (seg && (short_form ? n < 6 : n == 6) && scan_ipv4_address(ep, &ep) >= 0)
         {
             // Pointer is a terminating IPv4 address, so count 2 segments and break
             n += 2;
