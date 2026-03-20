@@ -1,4 +1,3 @@
-#include "hashmap.h"
 #include "uri.h"
 
 #define MAX_LINE_SIZE 8 * (1 << 20)
@@ -14,7 +13,7 @@ enum FLAGS
 
 struct part
 {
-    MAP *headers;
+    STRCASE_MAP *headers;
     uint64_t content_length;
     char *content;
 };
@@ -23,47 +22,47 @@ struct multipart
 {
     struct part **parts;
     int32_t length;
-    STACK *stack;
+    MEM_STACK *stack;
 };
 
 struct media_type
 {
     char *type;
     char *subtype;
-    MAP *parameters;
+    STR_MAP *parameters;
 };
 
 struct chunk
 {
-    uint64_t size;
+    int64_t size;
     char *content;
-    MAP *extension;
+    STR_MAP *extension;
 };
 
-struct int_range
+typedef struct range_spec_s
 {
-    uint64_t first;
-    uint64_t last;
-};
+    int64_t first;
+    int64_t last;
+} range_spec_t;
 
-struct range
+typedef struct range_s
 {
-    char *units;
-    char **set;
-    int length;
-    STACK *stack;
-};
+    char *unit;
+    char **specs;
+    int32_t n;
+    MEM_STACK *mem;
+} range_t;
 
 struct http_request
 {
     char *method;
     struct uri *target;
     char *version;
-    MAP *headers;
+    STRCASE_MAP *headers;
     char *content;
     uint64_t content_length;
-    MAP *trailers;
-    STACK *stack;
+    STRCASE_MAP *trailers;
+    MEM_STACK *stack;
     short flags;
 };
 
@@ -72,12 +71,12 @@ struct http_response
     char *version;
     short code;
     char *reason;
-    MAP *headers;
+    STRCASE_MAP *headers;
     char *file;
     char *content;
     uint64_t content_length;
-    MAP *trailers;
-    STACK *stack;
+    STRCASE_MAP *trailers;
+    MEM_STACK *stack;
 };
 
 void HTTP_request_init(struct http_request *req);
@@ -118,7 +117,7 @@ void HTTP_print_response(struct http_response *res);
 
 int parse_qstring(char *ptr, char **endptr, char **s);
 
-int HTTP_parse_range(char *ptr, char **endptr, struct range *r);
+int HTTP_parse_range(char *ptr, char **endptr, range_t *r);
 
 int HTTP_parse_media_type(char *ptr, char **endptr, struct media_type *result);
 
@@ -126,7 +125,7 @@ int HTTP_parse_request_line(char *ptr, char **endptr, struct http_request *req);
 
 int HTTP_parse_status_line(char *ptr, char **endptr, struct http_response *res);
 
-int HTTP_parse_field_line(char *ptr, char **endptr, struct entry *result);
+int HTTP_parse_field_line(char *ptr, char **endptr, STRCASE_MAP_entry_t *result);
 
 int HTTP_parse_chunk_head(char *ptr, char **endptr, struct chunk *result);
 

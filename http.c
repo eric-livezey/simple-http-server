@@ -5,8 +5,8 @@
 #include <ctype.h>
 #include <time.h>
 #include <netinet/in.h>
+#include <sys/stat.h>
 #include "utils.h"
-#include "hashmap.h"
 #include "uri.h"
 
 // DIGIT
@@ -35,7 +35,7 @@ static const uint64_t H_VCHAR = 0x7fffffffffffffff;
 
 // SP / HTAB
 static const uint64_t L_LWSP_CHAR = 0x100000200; // low_mask(" \t")
-static const uint64_t H_LWSP_CHAR = 0x0;         // high_mask(" \t")
+static const uint64_t H_LWSP_CHAR = 0x0;
 
 // tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
 //         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
@@ -47,8 +47,10 @@ static const uint64_t L_OBS_TEXT = L_NON_ASCII;
 static const uint64_t H_OBS_TEXT = H_NON_ASCII;
 
 // qdtext = HTAB / SP / %x21 / %x23-5B / %x5D-7E / obs-text
-static const uint64_t L_QDTEXT = (L_LWSP_CHAR | L_VCHAR | L_OBS_TEXT) & ~0x400000000; // low_mask("\"")
-static const uint64_t H_QDTEXT = (H_LWSP_CHAR | H_VCHAR | H_OBS_TEXT) & ~0x10000000;  // high_mask("\\")
+static const uint64_t L_QDTEXT = (L_LWSP_CHAR | L_VCHAR | L_OBS_TEXT) &
+                                 ~0x400000000; // low_mask("\"")
+static const uint64_t H_QDTEXT = (H_LWSP_CHAR | H_VCHAR | H_OBS_TEXT) &
+                                 ~0x10000000; // high_mask("\\")
 
 // quoted-pair = "\" ( HTAB / SP / VCHAR / obs-text )
 static const uint64_t L_QUOTED_PAIR = L_LWSP_CHAR | L_VCHAR | L_OBS_TEXT;
@@ -66,22 +68,26 @@ static const uint64_t H_FIELD = H_LWSP_CHAR | H_FIELD_VCHAR;
 static const uint64_t L_RANGE = L_VCHAR & ~0x100000000000; // low_mask(",")
 static const uint64_t H_RANGE = H_VCHAR;
 
+// etagc = %x21 / %x23-7E / obs-text ; VCHAR except double quotes, plus obs-text
+static const uint64_t L_ETAGC = L_OBS_TEXT | L_VCHAR & ~0x400000000; // low_mask("\"")
+static const uint64_t H_ETAGC = H_OBS_TEXT | H_VCHAR;
+
 // 8 MiB
 #define MAX_LINE_SIZE 0x800000
 #define BUFFER_SIZE UINT16_MAX
 
 enum FLAGS
 {
-    CONNECTION_ERROR = 0b00000001,
-    PARSE_ERROR = 0b00000010,
-    BAD_CONTENT_LENGTH = 0b00000100,
-    CONTENT_TOO_LARGE = 0b00001000,
-    CONNECTION_CLOSED = 0b00010000
+    CONNECTION_ERROR = 0x1,
+    PARSE_ERROR = 0x2,
+    BAD_CONTENT_LENGTH = 0x4,
+    CONTENT_TOO_LARGE = 0x8,
+    CONNECTION_CLOSED = 0x10
 };
 
 struct part
 {
-    MAP *headers;
+    STRCASE_MAP *headers;
     uint64_t content_length;
     char *content;
 };
@@ -90,47 +96,47 @@ struct multipart
 {
     struct part **parts;
     int32_t length;
-    STACK *stack;
+    MEM_STACK *stack;
 };
 
 struct media_type
 {
     char *type;
     char *subtype;
-    MAP *parameters;
+    STR_MAP *parameters;
 };
 
 struct chunk
 {
-    uint64_t size;
+    int64_t size;
     char *content;
-    MAP *extension;
+    STR_MAP *extension;
 };
 
-struct int_range
+typedef struct range_spec_s
 {
-    uint64_t first;
-    uint64_t last;
-};
+    int64_t first;
+    int64_t last;
+} range_spec_t;
 
-struct range
+typedef struct range_s
 {
-    char *units;
-    char **set;
-    int length;
-    STACK *stack;
-};
+    char *unit;
+    char **specs;
+    int32_t n;
+    MEM_STACK *mem;
+} range_t;
 
 struct http_request
 {
     char *method;
     struct uri *target;
     char *version;
-    MAP *headers;
+    STRCASE_MAP *headers;
     char *content;
     uint64_t content_length;
-    MAP *trailers;
-    STACK *stack;
+    STRCASE_MAP *trailers;
+    MEM_STACK *stack;
     uint8_t flags;
 };
 
@@ -139,12 +145,12 @@ struct http_response
     char *version;
     uint16_t code;
     char *reason;
-    MAP *headers;
+    STRCASE_MAP *headers;
     char *file;
     char *content;
     uint64_t content_length;
-    MAP *trailers;
-    STACK *stack;
+    STRCASE_MAP *trailers;
+    MEM_STACK *stack;
 };
 
 /*
@@ -153,17 +159,17 @@ struct http_response
  * -----------------
  */
 
-void RANGE_init(struct range *r)
+void RANGE_init(struct range_s *r)
 {
-    r->units = NULL;
-    r->set = NULL;
-    r->length = 0;
-    r->stack = STACK_new();
+    r->unit = NULL;
+    r->specs = NULL;
+    r->n = 0;
+    r->mem = MEM_STACK_new();
 }
 
-void RANGE_free(struct range *r)
+void RANGE_free(struct range_s *r)
 {
-    STACK_free(r->stack);
+    MEM_STACK_free_all(r->mem);
 }
 
 void HTTP_request_init(struct http_request *req)
@@ -171,13 +177,13 @@ void HTTP_request_init(struct http_request *req)
     req->method = "GET";
     req->target = URI_new();
     req->version = "HTTP/1.1";
-    req->headers = MAP_new_ignore_case();
+    req->headers = STRCASE_MAP_new();
     req->content = NULL;
     req->content_length = 0;
-    req->trailers = MAP_new_ignore_case();
-    req->stack = STACK_new();
+    req->trailers = STRCASE_MAP_new();
+    req->stack = MEM_STACK_new();
     req->flags = 0;
-    STACK_push(req->stack, req->target);
+    MEM_STACK_push(req->stack, req->target);
 }
 
 void HTTP_response_init(struct http_response *res)
@@ -185,30 +191,30 @@ void HTTP_response_init(struct http_response *res)
     res->version = "HTTP/1.1";
     res->code = 200;
     res->reason = "OK";
-    res->headers = MAP_new_ignore_case();
+    res->headers = STRCASE_MAP_new();
     res->file = NULL;
     res->content = NULL;
     res->content_length = 0;
-    res->trailers = MAP_new_ignore_case();
-    res->stack = STACK_new();
+    res->trailers = STRCASE_MAP_new();
+    res->stack = MEM_STACK_new();
 }
 
 void HTTP_request_free(struct http_request *req)
 {
     if (req->headers != NULL)
-        MAP_free(req->headers);
+        STRCASE_MAP_free(req->headers);
     if (req->trailers != NULL)
-        MAP_free(req->trailers);
-    STACK_free(req->stack);
+        STRCASE_MAP_free(req->trailers);
+    MEM_STACK_free_all(req->stack);
 }
 
 void HTTP_response_free(struct http_response *res)
 {
     if (res->headers != NULL)
-        MAP_free(res->headers);
+        STRCASE_MAP_free(res->headers);
     if (res->trailers != NULL)
-        MAP_free(res->trailers);
-    STACK_free(res->stack);
+        STRCASE_MAP_free(res->trailers);
+    MEM_STACK_free_all(res->stack);
 }
 
 char *HTTP_date_ex(struct tm *tm, char *result)
@@ -320,57 +326,57 @@ char *HTTP_reason(uint16_t code)
     }
 }
 
-MAP *content_type_map = NULL;
+STRCASE_MAP *content_type_map = NULL;
 bool content_type_map_initialized = false;
 
 char *HTTP_content_type(char *ext)
 {
     if (!content_type_map_initialized)
     {
-        MAP *map = MAP_new_ignore_case();
+        STRCASE_MAP *map = STRCASE_MAP_new();
         // video/matroska
-        MAP_put(map, "mkv", "video/matroska");
+        STRCASE_MAP_put(map, "mkv", "video/matroska");
         // video/matroska-3d
-        MAP_put(map, "mk3d", "video/matroska-3d");
+        STRCASE_MAP_put(map, "mk3d", "video/matroska-3d");
         // audio/matroska
-        MAP_put(map, "mka", "audio/matroska");
+        STRCASE_MAP_put(map, "mka", "audio/matroska");
         // application/octet-stream
-        MAP_put(map, "mks", "application/octet-stream");
+        STRCASE_MAP_put(map, "mks", "application/octet-stream");
         // video/mp4
-        MAP_put(map, "mp4", "video/mp4");
-        MAP_put(map, "m4g4", "video/mp4");
+        STRCASE_MAP_put(map, "mp4", "video/mp4");
+        STRCASE_MAP_put(map, "m4g4", "video/mp4");
         // audio/mpeg
-        MAP_put(map, "mp3", "audio/mpeg");
+        STRCASE_MAP_put(map, "mp3", "audio/mpeg");
         // video/webm
-        MAP_put(map, "webm", "video/webm");
+        STRCASE_MAP_put(map, "webm", "video/webm");
         // image/webp
-        MAP_put(map, "webp", "image/webp");
+        STRCASE_MAP_put(map, "webp", "image/webp");
         // image/svg+xml
-        MAP_put(map, "svg", "image/svg+xml");
-        MAP_put(map, "svgz", "image/svg+xml");
+        STRCASE_MAP_put(map, "svg", "image/svg+xml");
+        STRCASE_MAP_put(map, "svgz", "image/svg+xml");
         // image/jpeg
-        MAP_put(map, "jpg", "image/jpeg");
-        MAP_put(map, "jpeg", "image/jpeg");
+        STRCASE_MAP_put(map, "jpg", "image/jpeg");
+        STRCASE_MAP_put(map, "jpeg", "image/jpeg");
         // image/png
-        MAP_put(map, "png", "image/png");
+        STRCASE_MAP_put(map, "png", "image/png");
         // image/gif
-        MAP_put(map, "gif", "image/gif");
+        STRCASE_MAP_put(map, "gif", "image/gif");
         // text/javascript
-        MAP_put(map, "js", "text/javascript");
-        MAP_put(map, "mjs", "text/javascript");
+        STRCASE_MAP_put(map, "js", "text/javascript");
+        STRCASE_MAP_put(map, "mjs", "text/javascript");
         // application/json
-        MAP_put(map, "json", "application/json");
+        STRCASE_MAP_put(map, "json", "application/json");
         // text/html
-        MAP_put(map, "html", "text/html");
-        MAP_put(map, "htm", "text/html");
+        STRCASE_MAP_put(map, "html", "text/html");
+        STRCASE_MAP_put(map, "htm", "text/html");
         // text/css
-        MAP_put(map, "css", "text/css");
+        STRCASE_MAP_put(map, "css", "text/css");
         // text/plain
-        MAP_put(map, "txt", "text/plain");
+        STRCASE_MAP_put(map, "txt", "text/plain");
         content_type_map = map;
         content_type_map_initialized = true;
     }
-    return MAP_get_or_default(content_type_map, ext, "*");
+    return STRCASE_MAP_get_or_default(content_type_map, ext, "*");
 }
 
 uint64_t HTTP_reqsize(struct http_request *req, bool head)
@@ -385,8 +391,8 @@ uint64_t HTTP_reqsize(struct http_request *req, bool head)
     len += strlen(req->version);
     if (req->headers != NULL)
     {
-        struct entry **es = MAP_entry_set(req->headers), *e;
-        int size = MAP_size(req->headers);
+        STRCASE_MAP_entry_t **es = STRCASE_MAP_entry_set(req->headers), *e;
+        int size = STRCASE_MAP_size(req->headers);
         for (int i = 0; i < size; i++)
         {
             e = es[i];
@@ -418,8 +424,8 @@ uint64_t HTTP_push_request(BUFFER *b, struct http_request *req, bool head)
     if (req->headers != NULL)
     {
         // headers
-        struct entry **es = MAP_entry_set(req->headers), *e;
-        int size = MAP_size(req->headers);
+        STRCASE_MAP_entry_t **es = STRCASE_MAP_entry_set(req->headers), *e;
+        int size = STRCASE_MAP_size(req->headers);
         for (int i = 0; i < size; i++)
         {
             e = es[i];
@@ -474,8 +480,8 @@ uint64_t HTTP_ressize(struct http_response *req, bool head)
     len += strlen(req->reason);
     if (req->headers != NULL)
     {
-        struct entry **es = MAP_entry_set(req->headers), *e;
-        int size = MAP_size(req->headers);
+        STRCASE_MAP_entry_t **es = STRCASE_MAP_entry_set(req->headers), *e;
+        int size = STRCASE_MAP_size(req->headers);
         for (int i = 0; i < size; i++)
         {
             e = es[i];
@@ -503,8 +509,8 @@ uint64_t HTTP_push_response(BUFFER *b, struct http_response *res, bool head)
     if (res->headers != NULL)
     {
         // headers
-        struct entry **es = MAP_entry_set(res->headers), *e;
-        int size = MAP_size(res->headers);
+        STRCASE_MAP_entry_t **es = STRCASE_MAP_entry_set(res->headers), *e;
+        int size = STRCASE_MAP_size(res->headers);
         for (int i = 0; i < size; i++)
         {
             e = es[i];
@@ -640,7 +646,9 @@ int scan_ows(char *ptr, char **endptr)
     return scan(ptr, endptr, L_LWSP_CHAR, H_LWSP_CHAR);
 }
 
-// token = 1*tchar
+/// ```abnf
+/// token = 1*tchar
+/// ```
 int scan_token(char *ptr, char **endptr)
 {
     char *ep = ptr;
@@ -652,10 +660,42 @@ int scan_token(char *ptr, char **endptr)
     return ep - ptr;
 }
 
-// parameter       = parameter-name "=" parameter-value
-// parameter-name  = token
-// parameter-value = ( token / quoted-string )
-int HTTP_parse_parameter(char *ptr, char **endptr, struct entry *result)
+typedef struct entity_tag_s
+{
+    bool weak;
+    char *etag;
+} entity_tag_t;
+
+/// ```abnf
+/// entity-tag = [ weak ] opaque-tag
+/// weak       = %s"W/"
+/// opaque-tag = DQUOTE *etagc DQUOTE
+/// ```
+int parse_entity_tag(char *ptr, char **endptr, entity_tag_t *result)
+{
+    char *ep = ptr;
+    bool weak = scan_str(ptr, &ep, "W/") > 0;
+    if (*(ep++) != '"')
+    {
+        return -1;
+    }
+    char *etag = ep;
+    scan(ptr, &ep, L_ETAGC, H_ETAGC);
+    if (*(ep++) != '"')
+    {
+        return -1;
+    }
+    ep[-1] = '\0';
+    set_endptr(endptr, ep);
+    return ep - ptr;
+}
+
+/// ```abnf
+/// parameter       = parameter-name "=" parameter-value
+/// parameter-name  = token
+/// parameter-value = ( token / quoted-string )
+/// ```
+int HTTP_parse_parameter(char *ptr, char **endptr, STR_MAP_entry_t *result)
 {
     char *ep = ptr, *k, *v;
     k = ep;
@@ -684,10 +724,10 @@ int HTTP_parse_parameter(char *ptr, char **endptr, struct entry *result)
 }
 
 // parameters      = *( OWS ";" OWS [ parameter ] )
-int HTTP_parse_parameters(char *ptr, char **endptr, MAP *result)
+int HTTP_parse_parameters(char *ptr, char **endptr, STR_MAP *result)
 {
     char *p, *ep = ptr;
-    struct entry e;
+    STR_MAP_entry_t e;
     while (*ep)
     {
         p = ep;
@@ -708,7 +748,7 @@ int HTTP_parse_parameters(char *ptr, char **endptr, MAP *result)
         {
             continue;
         }
-        MAP_put(result, e.key, e.value);
+        STR_MAP_put(result, e.key, e.value);
     }
     set_endptr(endptr, ep);
     return ep - ptr;
@@ -719,7 +759,7 @@ int HTTP_parse_parameters(char *ptr, char **endptr, MAP *result)
 // last-pos      = 1*DIGIT
 // suffix-range  = "-" suffix-length
 // suffix-length = 1*DIGIT
-int HTTP_parse_int_range(char *ptr, char **endptr, uint64_t size, struct int_range *r)
+int8_t HTTP_parse_int_range(char *ptr, char **endptr, uint64_t size, range_spec_t *r)
 {
     bool has_first, has_last;
     char *p, *ep = ptr;
@@ -758,7 +798,7 @@ int HTTP_parse_int_range(char *ptr, char **endptr, uint64_t size, struct int_ran
 // suffix-length = 1*DIGIT
 // other-range   = 1*( %x21-2B / %x2D-7E )
 //               ; 1*(VCHAR excluding comma)
-int HTTP_scan_range_spec(char *ptr, char **endptr)
+int8_t HTTP_scan_range_spec(char *ptr, char **endptr)
 {
     char *ep = ptr;
     // int-range and suffix-range are both satisfiable by other-range
@@ -773,10 +813,10 @@ int HTTP_scan_range_spec(char *ptr, char **endptr)
 // ranges-specifier = range-unit "=" range-set
 // range-unit       = token
 // range-set        = range-spec *( OWS "," OWS range-spec )
-int HTTP_parse_range(char *ptr, char **endptr, struct range *r)
+int8_t HTTP_parse_range(char *ptr, char **endptr, range_t *r)
 {
     char *p, *s, *ep = ptr;
-    int len;
+    int8_t len;
     // range-unit
     p = ptr;
     if (scan_token(ep, &ep) < 0)
@@ -789,7 +829,7 @@ int HTTP_parse_range(char *ptr, char **endptr, struct range *r)
         return -1;
     }
     *ep = '\0';
-    r->units = p;
+    r->unit = p;
     ep++;
     // range-set
     // range-spec
@@ -798,12 +838,11 @@ int HTTP_parse_range(char *ptr, char **endptr, struct range *r)
     {
         return -1;
     }
-    STACK *specs = STACK_new();
-    STACK_push(specs, strnalloc(p, len, r->stack));
+    MEM_STACK *specs = MEM_STACK_new();
+    MEM_STACK_push(specs, strnalloc(p, len, r->mem));
     // *
     while (1)
     {
-        // (
         p = ep;
         // OWS
         scan_ows(ep, &ep);
@@ -822,18 +861,17 @@ int HTTP_parse_range(char *ptr, char **endptr, struct range *r)
             ep = p;
             break;
         }
-        STACK_push(specs, strnalloc(s, len, r->stack));
-        // )
+        MEM_STACK_push(specs, strnalloc(s, len, r->mem));
     }
-    int size = STACK_size(specs);
-    r->set = malloc(size * sizeof(char *));
-    STACK_push(r->stack, r->set);
-    while (!STACK_empty(specs))
+    uint32_t size = MEM_STACK_size(specs);
+    r->specs = malloc(size * sizeof(char *));
+    MEM_STACK_push(r->mem, r->specs = malloc(size * sizeof(char *)));
+    while (STACK_size(specs) > 0)
     {
-        r->set[STACK_size(specs) - 1] = STACK_pop(specs);
+        r->specs[STACK_size(specs) - 1] = MEM_STACK_pop(specs);
     }
-    STACK_free(specs);
-    r->length = size;
+    MEM_STACK_free_all(specs);
+    r->n = size;
     set_endptr(endptr, ep);
     return ep - ptr;
 }
@@ -842,8 +880,8 @@ typedef int(parser_t)(char *, char **, void *);
 
 /// @brief Parse a line from the ptr into the result using the parser.
 /// @note Technically, this could index out of a buffer if we passed an argument for ptr which did
-/// not end in a CRLF. This is not an issue for this implementation though since we only receive lines
-/// up to and including a terminating CRLF.
+/// not end in a CRLF. This is not an issue for this implementation though since we only receive
+/// lines up to and including a terminating CRLF.
 /// @param ptr The pointer.
 /// @param parser The parser function.
 /// @param result The result object for the parser.
@@ -908,7 +946,8 @@ int HTTP_parse_authority_form(char *ptr, char **endptr, struct uri *uri)
 {
     char *p = ptr, *ep = ptr;
     // IP-literal / IPv4address / reg-name
-    if (scan_ip_literal(ep, &ep) < 0 && scan_ipv4_address(ep, &ep) < 0 && scan_reg_name(ep, &ep) < 0)
+    if (scan_ip_literal(ep, &ep) < 0 && scan_ipv4_address(ep, &ep) < 0 &&
+        scan_reg_name(ep, &ep) < 0)
     {
         return -1;
     }
@@ -953,11 +992,12 @@ int HTTP_parse_origin_form(char *ptr, char **endptr, struct uri *uri)
 //                / asterisk-form
 // absolute-form  = absolute-URI
 // asterisk-form  = "*"
-int HTTP_parse_request_target(char *ptr, char **endptr, struct uri *uri, STACK *stack)
+int HTTP_parse_request_target(char *ptr, char **endptr, struct uri *uri, MEM_STACK *stack)
 {
     char *ep = ptr;
     // origin-form / absolute-form / authority-form
-    if (HTTP_parse_origin_form(ep, &ep, uri) < 0 && parse_absolute_URI(ep, &ep, uri, stack) < 0 && HTTP_parse_authority_form(ep, &ep, uri) < 0)
+    if (HTTP_parse_origin_form(ep, &ep, uri) < 0 && parse_absolute_URI(ep, &ep, uri, stack) < 0 &&
+        HTTP_parse_authority_form(ep, &ep, uri) < 0)
     {
         // "*"
         if (*ep = '*')
@@ -1056,8 +1096,10 @@ int HTTP_parse_request_line(char *ptr, char **endptr, struct http_request *req)
     return ep - ptr;
 }
 
-// status-line    = HTTP-version SP status-code SP [ reason-phrase ]
-// status-code    = 3DIGIT
+/// ```abnf
+/// status-line    = HTTP-version SP status-code SP [ reason-phrase ]
+/// status-code    = 3DIGIT
+/// ```
 int HTTP_parse_status_line(char *ptr, char **endptr, struct http_response *res)
 {
     char *p, *ep = ptr;
@@ -1098,13 +1140,15 @@ int HTTP_parse_status_line(char *ptr, char **endptr, struct http_response *res)
     return ep - ptr;
 }
 
-// field-line     = field-name ":" OWS field-value OWS
-// field-name     = token
-// field-value    = *field-content
-// field-content  = field-vchar
-//                  [ 1*( SP / HTAB / field-vchar ) field-vchar ]
-// field-vchar    = VCHAR / obs-text
-int HTTP_parse_field_line(char *ptr, char **endptr, struct entry *f)
+/// ```abnf
+/// field-line     = field-name ":" OWS field-value OWS
+/// field-name     = token
+/// field-value    = *field-content
+/// field-content  = field-vchar
+///                  [ 1*( SP / HTAB / field-vchar ) field-vchar ]
+/// field-vchar    = VCHAR / obs-text
+/// ```
+int HTTP_parse_field_line(char *ptr, char **endptr, STRCASE_MAP_entry_t *f)
 {
     char *p, *ep = ptr;
     // field-name
@@ -1154,12 +1198,14 @@ int HTTP_parse_field_line(char *ptr, char **endptr, struct entry *f)
     return ep - ptr;
 }
 
-// chunk-ext      = *( BWS ";" BWS chunk-ext-name
-//                     [ BWS "=" BWS chunk-ext-val ] )
-// chunk-ext-name = token
-// chunk-ext-val  = token / quoted-string
-// BWS            = OWS
-int HTTP_parse_chunk_ext(char *ptr, char **endptr, MAP *ext)
+/// ```abnf
+/// chunk-ext      = *( BWS ";" BWS chunk-ext-name
+///                     [ BWS "=" BWS chunk-ext-val ] )
+/// chunk-ext-name = token
+/// chunk-ext-val  = token / quoted-string
+/// BWS            = OWS
+/// ```
+int HTTP_parse_chunk_ext(char *ptr, char **endptr, STR_MAP *ext)
 {
     char *p, *ep = ptr, *k, *v;
     // *
@@ -1196,7 +1242,7 @@ int HTTP_parse_chunk_ext(char *ptr, char **endptr, MAP *ext)
         // "="
         if (*ep != '=')
         {
-            MAP_put(ext, k, NULL);
+            STR_MAP_put(ext, k, NULL);
             ep = p;
             continue;
         }
@@ -1207,11 +1253,11 @@ int HTTP_parse_chunk_ext(char *ptr, char **endptr, MAP *ext)
         // chunk-ext-val
         if (scan_token(v = ep, &ep) < 0 && parse_qstring(ep, &ep, &v) < 0)
         {
-            MAP_put(ext, k, NULL);
+            STR_MAP_put(ext, k, NULL);
             ep = p;
             break;
         }
-        MAP_put(ext, k, v);
+        STR_MAP_put(ext, k, v);
     }
     set_endptr(endptr, ep);
     return ep - ptr;
@@ -1286,7 +1332,7 @@ int32_t scan_text(char *ptr, char **endptr, int32_t *nptr)
     set_endptr(endptr, ptr + off);
     return off;
 }
-
+// ```
 // discard-text = *(*text CRLF) *text
 int32_t scan_discard_text(char *ptr, char **endptr, int32_t *nptr)
 {
@@ -1365,13 +1411,16 @@ int32_t scan_delimiter(char *ptr, char **endptr, int32_t *nptr, char *boundary)
     return ep - ptr;
 }
 
-// dash-boundary transport-padding CRLF
+/// ```abnf
+/// dash-boundary transport-padding CRLF
+/// ```
 int32_t scan_first_boundary_line(char *ptr, char **endptr, int32_t *nptr, char *boundary)
 {
     char *ep = ptr;
     int32_t n = *nptr, ret;
     // dash-boundary transport-padding CRLF
-    if (scan_dash_boundary(ep, &ep, &n, boundary) < 0 || scan_transport_padding(ep, &ep, &n) < 0 || (ret = scann_crlf(ep, &ep, n)) < 0)
+    if (scan_dash_boundary(ep, &ep, &n, boundary) < 0 || scan_transport_padding(ep, &ep, &n) < 0 ||
+        (ret = scann_crlf(ep, &ep, n)) < 0)
     {
         return -1;
     }
@@ -1381,30 +1430,32 @@ int32_t scan_first_boundary_line(char *ptr, char **endptr, int32_t *nptr, char *
     return ep - ptr;
 }
 
-// multipart-body  = [preamble CRLF]
-//                   dash-boundary transport-padding CRLF
-//                   body-part *encapsulation
-//                   close-delimiter transport-padding
-//                   [CRLF epilogue]
-// dash-boundary   = "--" boundary
-//                   ; boundary taken from the value of
-//                   ; boundary parameter of the
-//                   ; Content-Type field.
-// preamble        = discard-text
-// epilogue        = discard-text
-// discard-text    = *(*text CRLF) *text
-//                   ; May be ignored or discarded.
-// body-part       = MIME-part-headers [CRLF *OCTET]
-// OCTET           = <any 0-255 octet value>
-// encapsulation   = delimiter transport-padding
-//                   CRLF body-part
-// delimiter       = CRLF dash-boundary
-// close-delimiter = delimiter "--"
+/// ```abnf
+/// multipart-body  = [preamble CRLF]
+///                   dash-boundary transport-padding CRLF
+///                   body-part *encapsulation
+///                   close-delimiter transport-padding
+///                   [CRLF epilogue]
+/// dash-boundary   = "--" boundary
+///                   ; boundary taken from the value of
+///                   ; boundary parameter of the
+///                   ; Content-Type field.
+/// preamble        = discard-text
+/// epilogue        = discard-text
+/// discard-text    = *(*text CRLF) *text
+///                   ; May be ignored or discarded.
+/// body-part       = MIME-part-headers [CRLF *OCTET]
+/// OCTET           = <any 0-255 octet value>
+/// encapsulation   = delimiter transport-padding
+///                   CRLF body-part
+/// delimiter       = CRLF dash-boundary
+/// close-delimiter = delimiter "--"
+/// ```
 bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipart *mp)
 {
     bool done = false;
     char c, *p, *ep = ptr, *v;
-    struct entry e;
+    STRCASE_MAP_entry_t e;
     struct part *part, **parts = NULL, **temp;
     // only the actual body part can exceed INT32_MAX
     int32_t ret, smax = INT32_MAX > n ? n : INT32_MAX, srem = smax;
@@ -1435,10 +1486,11 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
     while (!done)
     {
         part = malloc(sizeof(part));
-        part->headers = MAP_new_ignore_case();
+        part->headers = STRCASE_MAP_new();
         part->content = NULL;
         part->content_length = 0;
-        // Temporarily terminate the buffer with a null terminator so that parseln doesn't index out of it
+        // Temporarily terminate the buffer with a null terminator so that parseln doesn't index
+        // out of it
         c = ep[rem - 1];
         ep[rem - 1] = '\0';
         // MIME-part-headers
@@ -1446,15 +1498,15 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
         {
             ep += ret;
             rem -= ret;
-            if ((v = MAP_get(part->headers, e.key)) != NULL && e.value != NULL)
+            if ((v = STRCASE_MAP_get(part->headers, e.key)) != NULL && e.value != NULL)
             {
                 // delimit duplicate fields by "," characters
                 v = buffcat(v, strlen(v), ", ", 3);
                 e.key = buffcat(v, strlen(v), e.value, strlen(e.value) + 1);
                 free(v);
-                STACK_push(mp->stack, e.key);
+                MEM_STACK_push(mp->stack, e.key);
             }
-            MAP_put(part->headers, e.key, e.value);
+            STRCASE_MAP_put(part->headers, e.key, e.value);
         }
         ep[rem - 1] = c;
         srem = smax = INT32_MAX > rem ? rem : INT32_MAX;
@@ -1465,7 +1517,7 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
             // which must be preceeded by a CRLF
             if ((ret = scann_crlf(ep, &ep, srem)) < 0)
             {
-                MAP_free(part->headers);
+                STRCASE_MAP_free(part->headers);
                 free(part);
                 if (parts != NULL)
                 {
@@ -1482,7 +1534,7 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
             {
                 if (rem == 0)
                 {
-                    MAP_free(part->headers);
+                    STRCASE_MAP_free(part->headers);
                     free(part);
                     if (parts != NULL)
                     {
@@ -1508,7 +1560,7 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
         // transport-padding
         if (scan_transport_padding(ep, &ep, &srem) < 0)
         {
-            MAP_free(part->headers);
+            STRCASE_MAP_free(part->headers);
             free(part);
             if (parts != NULL)
             {
@@ -1521,7 +1573,7 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
             // If the delimiter wasn't closing, then there must be a CRLF before the next body-part
             if ((ret = scann_crlf(ep, &ep, srem)) < 0)
             {
-                MAP_free(part->headers);
+                STRCASE_MAP_free(part->headers);
                 free(part);
                 if (parts != NULL)
                 {
@@ -1557,7 +1609,7 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
     }
     mp->parts = parts;
     mp->length = length;
-    STACK_push(mp->stack, parts);
+    MEM_STACK_push(mp->stack, parts);
     return rem == 0;
 }
 
@@ -1576,8 +1628,8 @@ __thread uint16_t buffer_pos = 0;
 /// @brief The total size of the data read to the buffer
 __thread uint16_t buffer_size = 0;
 
-/// @brief Receives up to N bytes from the socket FD and places them into the buffer.
-/// Ensures that data is read from the global buffer if applicable before receiving new data.
+/// @brief Receives up to N bytes from the socket FD and places them into the buffer. Ensures that
+/// data is read from the global buffer if applicable before receiving new data.
 /// @param fd The socket file descriptor
 /// @param buf The buffer
 /// @param n The maximum number of bytes to read
@@ -1653,7 +1705,8 @@ int32_t recvln(int fd, char **ptr)
         }
         if (i == 0 && size >= 1 && data[size - 1] == '\r' && buffer[0] == '\n')
         {
-            // The last character from the data and first character from the buffer make a CRLF, so mark the loop as done
+            // The last character from the data and first character from the buffer make a CRLF, so
+            // mark the loop as done
             done = true;
         }
         // Search for the CRLF in the buffer
@@ -1682,7 +1735,8 @@ int32_t recvln(int fd, char **ptr)
     return size;
 }
 
-int32_t HTTP_recvln(int fd, parser_t *parser, void *result, uint8_t *flags, STACK *stack, bool allow_empty)
+int32_t HTTP_recvln(int fd, parser_t *parser, void *result, uint8_t *flags, MEM_STACK *stack,
+                    bool allow_empty)
 {
     char *ptr;
     int32_t ret = recvln(fd, &ptr);
@@ -1702,7 +1756,7 @@ int32_t HTTP_recvln(int fd, parser_t *parser, void *result, uint8_t *flags, STAC
         }
         return -1;
     }
-    STACK_push(stack, ptr);
+    MEM_STACK_push(stack, ptr);
     if (ret == 2 && allow_empty)
     {
         return 2;
@@ -1746,12 +1800,13 @@ struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
     uint16_t size = BUFFER_SIZE;
     ssize_t ret;
     uint64_t bytes;
-    struct entry e;
+    STR_MAP_entry_t e;
     struct chunk chunk;
-    chunk.extension = MAP_new();
-    if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_chunk_head, &chunk, &result->flags, result->stack, false) < 0)
+    chunk.extension = STR_MAP_new();
+    if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_chunk_head, &chunk, &result->flags, result->stack,
+                    false) < 0)
     {
-        MAP_free(chunk.extension);
+        STR_MAP_free(chunk.extension);
         return NULL;
     }
     while (chunk.size > 0)
@@ -1760,10 +1815,11 @@ struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
         bytes = 0;
         while (bytes < chunk.size)
         {
-            ret = recv_r(fd, chunk.content + bytes, bytes + size > chunk.size ? chunk.size - bytes : size, 0);
+            ret = recv_r(fd, chunk.content + bytes,
+                         bytes + size > chunk.size ? chunk.size - bytes : size, 0);
             if (ret <= 0)
             {
-                MAP_free(chunk.extension);
+                STR_MAP_free(chunk.extension);
                 free(chunk.content);
                 result->flags |= CONNECTION_ERROR;
                 return NULL;
@@ -1772,29 +1828,32 @@ struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
         }
         if (!HTTP_recvln_empty(fd, &result->flags))
         {
-            MAP_free(chunk.extension);
+            STR_MAP_free(chunk.extension);
             free(chunk.content);
             return NULL;
         }
         temp = result->content;
-        result->content = buffcat(result->content, result->content_length, chunk.content, chunk.size);
+        result->content = buffcat(result->content, result->content_length, chunk.content,
+                                  chunk.size);
         free(chunk.content);
         if (temp != NULL)
             free(temp);
         result->content_length += chunk.size;
-        MAP_free(chunk.extension); // discard chunk extension
-        chunk.extension = MAP_new();
-        if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_chunk_head, &chunk, &result->flags, result->stack, false) < 0)
+        STR_MAP_free(chunk.extension); // discard chunk extension
+        chunk.extension = STR_MAP_new();
+        if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_chunk_head, &chunk, &result->flags,
+                        result->stack, false) < 0)
         {
-            MAP_free(chunk.extension);
+            STR_MAP_free(chunk.extension);
             return NULL;
         }
     }
-    STACK_push(result->stack, result->content);
+    MEM_STACK_push(result->stack, result->content);
     while (1)
     {
         // field-lines
-        if ((ret = HTTP_recvln(fd, (parser_t *)&HTTP_parse_field_line, &e, &result->flags, result->stack, true)) < 0)
+        if ((ret = HTTP_recvln(fd, (parser_t *)&HTTP_parse_field_line, &e, &result->flags,
+                               result->stack, true)) < 0)
         {
             return NULL;
         }
@@ -1802,23 +1861,23 @@ struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
         {
             break;
         }
-        if ((v = MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
+        if ((v = STRCASE_MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
         {
             // delimit duplicate headers by ","
             v = buffcat(v, strlen(v), ", ", 3);
             e.value = buffcat(v, strlen(v), e.value, strlen(e.value) + 1);
             free(v);
-            STACK_push(result->stack, e.value);
+            MEM_STACK_push(result->stack, e.value);
         }
-        MAP_put(result->trailers, e.key, e.value);
+        STR_MAP_put(result->trailers, e.key, e.value);
     }
     return result;
 }
 
 ssize_t HTTP_send_response(struct http_response *res, int fd, bool head)
 {
-    MAP_put_if_absent(res->headers, "Connection", "close");
-    if (!MAP_contains_key(res->headers, "Date"))
+    STRCASE_MAP_put_if_absent(res->headers, "Connection", "close");
+    if (!STRCASE_MAP_contains_key(res->headers, "Date"))
     {
         /* date */
         time_t timer;
@@ -1826,17 +1885,17 @@ ssize_t HTTP_send_response(struct http_response *res, int fd, bool head)
         struct tm t;
         gmtime_r(&timer, &t);
         char *date = HTTP_date(&t);
-        STACK_push(res->stack, date);
-        MAP_put(res->headers, "Date", date);
+        MEM_STACK_push(res->stack, date);
+        STRCASE_MAP_put(res->headers, "Date", date);
     }
     if (res->code != 204)
     {
         /* content-length */
         char *content_length = malloc(numlenul(res->content_length) + 1);
-        STACK_push(res->stack, content_length);
+        MEM_STACK_push(res->stack, content_length);
         *content_length = '\0';
         sprintf(content_length, "%lu", res->content_length);
-        MAP_put(res->headers, "Content-Length", content_length);
+        STRCASE_MAP_put(res->headers, "Content-Length", content_length);
     }
     uint8_t *s;
     uint64_t size = HTTP_resmsg_ex(res, head, &s);
@@ -1845,30 +1904,45 @@ ssize_t HTTP_send_response(struct http_response *res, int fd, bool head)
     return written;
 }
 
+void HTTP_put_file_headers(struct http_response *res, char *path)
+{
+    // Last-Modified
+    struct stat path_stat;
+    stat(path, &path_stat) == 0;
+    struct tm mtime;
+    gmtime_r(&path_stat.st_mtime, &mtime);
+    char *last_modified = HTTP_date(&mtime);
+    MEM_STACK_push(res->stack, last_modified);
+    STRCASE_MAP_put(res->headers, "Last-Modified", last_modified);
+}
+
 void HTTP_respond_file(struct http_request *req, char *path, struct http_response *res, int fd)
 {
-    MAP_put(res->headers, "Accept-Ranges", "bytes");
-    MAP_put_if_absent(res->headers, "Cache-Control", "no-cache");
+    STRCASE_MAP_put(res->headers, "Accept-Ranges", "bytes");
+    STRCASE_MAP_put_if_absent(res->headers, "Cache-Control", "no-cache");
     FILE *fp = fopen(path, "r");
     fseek(fp, 0L, SEEK_END);
     uint64_t size = ftell(fp); /* file size */
-    char *rangeh = MAP_get(req->headers, "Range");
+    char *rangeh = STRCASE_MAP_get(req->headers, "Range");
     if (rangeh != NULL)
     {
         // Range was specified
         bool bad_range = false;
         char *endptr;
-        struct range range;
+        range_t range;
         RANGE_init(&range);
-        struct int_range spec = {0, 0};
+        range_spec_t spec = {0, 0};
         // Parse range
         if (HTTP_parse_range(rangeh, &endptr, &range) < 0 || *endptr != '\0')
         {
             bad_range = true;
         }
         // TODO: Handle multiple ranges
+        // e.g. Range: bytes 10-20, 20-30, 30-40
         // Parse specifier
-        if (strcmp(range.units, "bytes") != 0 || range.length > 1 || HTTP_parse_int_range(range.set[0], &endptr, size, &spec) < 0 || *endptr != '\0')
+        if (
+            strcmp(range.unit, "bytes") != 0 || range.n > 1 ||
+            HTTP_parse_int_range(range.specs[0], &endptr, size, &spec) < 0 || *endptr != '\0')
         {
             bad_range = true;
         }
@@ -1883,29 +1957,31 @@ void HTTP_respond_file(struct http_request *req, char *path, struct http_respons
             res->code = 416; /* Range Not Satisfiable */
             res->reason = HTTP_reason(res->code);
             char *content_range = malloc(numlenul(size) + 9);
-            STACK_push(res->stack, content_range);
+            MEM_STACK_push(res->stack, content_range);
             *content_range = '\0';
             sprintf(content_range, "bytes */%ld", size);
-            MAP_put(res->headers, "Content-Range", content_range);
+            STRCASE_MAP_put(res->headers, "Content-Range", content_range);
             HTTP_send_response(res, fd, false);
         }
         else
         {
             res->code = 206; /* Partial Content */
             res->reason = HTTP_reason(res->code);
+            HTTP_put_file_headers(res, path);
             /* content-range */
-            char *content_range = malloc(numlenul(spec.first) + numlenul(spec.last) + numlenul(size) + 9);
-            STACK_push(res->stack, content_range);
+            char *content_range = malloc(numlenul(spec.first) + numlenul(spec.last) +
+                                         numlenul(size) + 9);
+            MEM_STACK_push(res->stack, content_range);
             *content_range = '\0';
             sprintf(content_range, "bytes %ld-%ld/%ld", spec.first, spec.last, size);
-            MAP_put(res->headers, "Content-Range", content_range);
+            STRCASE_MAP_put(res->headers, "Content-Range", content_range);
             /* size */
             size = spec.last - spec.first + 1;
             res->content_length = size;
             HTTP_send_response(res, fd, true);
             if (strcmp(req->method, "HEAD") != 0)
                 /* body */
-                send_file(fd, fp, spec.first, spec.last);
+                send_file(fd, fp, spec.first, spec.last - spec.first + 1);
         }
     }
     else
@@ -1913,10 +1989,11 @@ void HTTP_respond_file(struct http_request *req, char *path, struct http_respons
 
         res->reason = HTTP_reason(res->code);
         res->content_length = size;
+        HTTP_put_file_headers(res, path);
         HTTP_send_response(res, fd, true);
         /* body */
         if (strcmp(req->method, "HEAD") != 0)
-            send_file(fd, fp, 0, size - 1);
+            send_file(fd, fp, 0, size);
     }
     fclose(fp);
 }
@@ -1925,17 +2002,19 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
 {
     char *data = NULL, *temp, *ep, *v;
     int32_t ret;
-    struct entry e;
+    STRCASE_MAP_entry_t e;
     result->method = NULL;
     result->version = NULL;
-    if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_request_line, result, &result->flags, result->stack, false) < 0)
+    if (HTTP_recvln(fd, (parser_t *)&HTTP_parse_request_line, result, &result->flags,
+                    result->stack, false) < 0)
     {
         return NULL;
     }
     while (1)
     {
         // field-lines
-        if ((ret = HTTP_recvln(fd, (parser_t *)&HTTP_parse_field_line, &e, &result->flags, result->stack, true)) < 0)
+        if ((ret = HTTP_recvln(fd, (parser_t *)&HTTP_parse_field_line, &e, &result->flags,
+                               result->stack, true)) < 0)
         {
             return NULL;
         }
@@ -1943,18 +2022,18 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
         {
             break;
         }
-        if ((v = MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
+        if ((v = STRCASE_MAP_get(result->headers, e.key)) != NULL && e.value != NULL)
         {
             // delimit duplicate headers by ","
             v = buffcat(v, strlen(v), ", ", 3);
             e.value = buffcat(v, strlen(v), e.value, strlen(e.value) + 1);
             free(v);
-            STACK_push(result->stack, e.value);
+            MEM_STACK_push(result->stack, e.value);
         }
-        MAP_put(result->headers, e.key, e.value);
+        STRCASE_MAP_put(result->headers, e.key, e.value);
     }
     // message body
-    if ((v = MAP_get(result->headers, "Transfer-Encoding")) != NULL && *v != '\0')
+    if ((v = STRCASE_MAP_get(result->headers, "Transfer-Encoding")) != NULL && *v != '\0')
     {
         int len = 1;
         char *ptr = v;
@@ -1982,10 +2061,11 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
             if (strcasecmp(encodings[i], "chunked") == 0)
                 HTTP_recv_chunks(fd, result);
     }
-    else if (MAP_contains_key(result->headers, "Content-Length"))
+    else if (STRCASE_MAP_contains_key(result->headers, "Content-Length"))
     {
         char *ptr, *endptr;
-        uint64_t content_length = strtoull(ptr = MAP_get(result->headers, "Content-Length"), &endptr, 10);
+        uint64_t content_length = strtoull(ptr = STRCASE_MAP_get(result->headers, "Content-Length"),
+                                           &endptr, 10);
         if (*ptr == '\0' || *endptr != '\0')
         {
             result->flags |= BAD_CONTENT_LENGTH;
@@ -1993,11 +2073,10 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
         }
         if (content_length > 0x200000000) // 8 GB limit
         {
-            /*
-             * NOTE: if we don't read the request to completion, the client will likely not receive the response
-             * but reading the whole request will take far too long with 8GB+ file sizes and thus waste resources
-             * so even though the request may be valid, we reject it immediately and close the connection.
-             */
+            // NOTE: if we don't read the request to completion, the client will likely not
+            // receive the response but reading the whole request will take far too long with 8GB+
+            // file sizes and thus waste resources so even though the request may be valid, we
+            // reject it immediately and close the connection.
             result->flags |= CONTENT_TOO_LARGE;
             return NULL;
         }
@@ -2006,7 +2085,8 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
         uint64_t bytes = 0;
         while (bytes < content_length)
         {
-            ret = recv_r(fd, result->content + bytes, bytes + size > content_length ? content_length - bytes : size, 0);
+            ret = recv_r(fd, result->content + bytes,
+                         bytes + size > content_length ? content_length - bytes : size, 0);
             if (ret <= 0)
             {
                 free(result->content);
@@ -2015,7 +2095,7 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
             }
             bytes += ret;
         }
-        STACK_push(result->stack, result->content);
+        MEM_STACK_push(result->stack, result->content);
         result->content_length = content_length;
     }
     return result;

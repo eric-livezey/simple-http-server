@@ -1,42 +1,31 @@
+#ifndef _UTILS_H
+#define _UTILS_H
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <bits/types/FILE.h>
-
-typedef struct stack_s STACK;
-
-void STACK_init(STACK *s);
-
-STACK *STACK_new();
-
-void *STACK_pop(STACK *s);
-
-void STACK_push(STACK *s, void *data);
-
-uint32_t STACK_size(STACK *s);
-
-bool STACK_empty(STACK *s);
-
-void STACK_free(STACK *s);
+#include <sys/types.h>
+#include "types.h"
 
 typedef struct buffer_s BUFFER;
 
-BUFFER *BUFFER_new(uint64_t capacity);
+BUFFER *BUFFER_new(size_t capacity);
 
-uint64_t BUFFER_size(BUFFER *b);
+size_t BUFFER_size(BUFFER *b);
 
-uint64_t BUFFER_push(BUFFER *b, uint8_t *data, uint64_t n);
+size_t BUFFER_push(BUFFER *b, uint8_t *data, size_t n);
 
 bool BUFFER_pushb(BUFFER *b, uint8_t byte);
 
-uint32_t BUFFER_sprint(BUFFER *b, char *str);
+size_t BUFFER_sprint(BUFFER *b, char *str);
 
-int BUFFER_sprintf(BUFFER *b, char *format, ...);
+int32_t BUFFER_sprintf(BUFFER *b, char *format, ...);
 
-uint64_t BUFFER_pop(BUFFER *b, uint64_t n, uint8_t *result);
+size_t BUFFER_pop(BUFFER *b, size_t n, uint8_t *result);
 
 uint8_t *BUFFER_get(BUFFER *b);
 
-uint64_t BUFFER_get_ex(BUFFER *b, uint8_t **result);
+size_t BUFFER_get_ex(BUFFER *b, uint8_t **result);
 
 int strtoi(char *ptr, char **endptr, int base);
 
@@ -71,13 +60,19 @@ int32_t scan_str(char *ptr, char **endptr, char *str);
 
 int32_t scann_str(char *ptr, char **endptr, int32_t n, char *str);
 
-char *strnalloc(char *src, size_t n, STACK *stack);
+char *strnalloc(const char *src, size_t n, MEM_STACK *stack);
 
 long double gettime();
 
-char send_file(int fd, FILE *fp, unsigned long begin, unsigned long end);
+/// @brief Sends a file over a socket.
+/// @param fd The socket file descriptor
+/// @param fp The file pointer
+/// @param offset The offset
+/// @param n The number of bytes to send
+/// @return The number if bytes sent
+ssize_t send_file(int32_t fd, FILE *fp, int64_t offset, int64_t n);
 
-uint8_t *buffcat(uint8_t *buff1, unsigned long n1, uint8_t *buff2, unsigned long n2);
+uint8_t *buffcat(uint8_t *buff1, size_t n1, uint8_t *buff2, size_t n2);
 
 void urldecode(char *dst, char *src);
 
@@ -89,6 +84,4 @@ int strlastindexof(char *ptr, char c);
 
 int numlenul(unsigned long x);
 
-int log2floor(int x);
-
-int log2ceil(int x);
+#endif

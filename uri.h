@@ -1,3 +1,6 @@
+#ifndef _URI_H
+#define _URI_H
+
 #include "utils.h"
 
 /// @brief Represents a Uniform Resource Identifier (URI) reference.
@@ -61,4 +64,6 @@ int scan_path_absolute(char *ptr, char **endptr);
 
 int parse_authority(char *ptr, char **endptr, struct uri *uri);
 
-int parse_absolute_URI(char *ptr, char **endptr, struct uri *uri, STACK *stack);
+int parse_absolute_URI(char *ptr, char **endptr, struct uri *uri, MEM_STACK *stack);
+
+#endif

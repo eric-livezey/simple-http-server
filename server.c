@@ -15,17 +15,30 @@ bool debug = false;
 
 typedef void(request_handler)(struct http_request *, struct http_response *);
 
-struct path_handler
+typedef struct path_handler_s
 {
     request_handler *get;
     request_handler *post;
     request_handler *put;
     request_handler *patch;
     request_handler *delete;
-};
+} path_handler_t;
+
+#define KEY_TYPE char *
+#define KEY_HASH strcasehash_p
+#define KEY_CMP strcasecmp_p
+#define VALUE_TYPE path_handler_t *
+#define LABEL HANDLER_MAP
+#include "types/map/tmap.h"
+#undef KEY_TYPE
+#undef KEY_HASH
+#undef KEY_CMP
+#undef VALUE_TYPE
+#undef VALUE_CMP
+#undef LABEL
 
 request_handler *default_handler = NULL;
-MAP *handlers = NULL;
+HANDLER_MAP *handlers = NULL;
 
 void set_default_handler(request_handler *handler)
 {
@@ -35,10 +48,10 @@ void set_default_handler(request_handler *handler)
 void set_path_handler(char *target, char *method, request_handler *handler)
 {
     if (handlers == NULL)
-        handlers = MAP_new(0);
-    struct path_handler *path_handler;
-    if ((path_handler = MAP_get(handlers, target)) == NULL)
-        MAP_put(handlers, target, path_handler = calloc(1, sizeof(struct path_handler)));
+        handlers = HANDLER_MAP_new();
+    path_handler_t *path_handler;
+    if ((path_handler = HANDLER_MAP_get(handlers, target)) == NULL)
+        HANDLER_MAP_put(handlers, target, path_handler = calloc(1, sizeof(path_handler_t)));
     if (strcmp(method, "GET") == 0)
         path_handler->get = handler;
     else if (strcmp(method, "POST") == 0)
@@ -51,7 +64,7 @@ void set_path_handler(char *target, char *method, request_handler *handler)
         path_handler->delete = handler;
 }
 
-char *generate_allow(struct path_handler *handler)
+char *generate_allow(path_handler_t *handler)
 {
     char *result = malloc(36);
     *result = '\0';
@@ -86,14 +99,14 @@ char *generate_allow(struct path_handler *handler)
 
 char *generate_content_type(struct media_type *ct)
 {
-    struct entry *entry;
+    STR_MAP_entry_t *entry;
     int i;
     unsigned long size = 2;
     size += strlen(ct->type);
     size += strlen(ct->subtype);
-    for (i = 0; i < MAP_size(ct->parameters); i++)
+    for (i = 0; i < STR_MAP_size(ct->parameters); i++)
     {
-        entry = MAP_entry_set(ct->parameters)[i];
+        entry = STR_MAP_entry_set(ct->parameters)[i];
         size += 5;
         size += strlen(entry->key);
         size += strlen(entry->value);
@@ -102,9 +115,9 @@ char *generate_content_type(struct media_type *ct)
     *result = '\0';
     size = 0;
     size += sprintf(result, "%s/%s", ct->type, ct->subtype);
-    for (i = 0; i < MAP_size(ct->parameters); i++)
+    for (i = 0; i < STR_MAP_size(ct->parameters); i++)
     {
-        entry = MAP_entry_set(ct->parameters)[i];
+        entry = STR_MAP_entry_set(ct->parameters)[i];
         size += sprintf(result + size, "; %s=\"%s\"", entry->key, (char *)entry->value);
     }
     return result;
@@ -115,7 +128,7 @@ void handle_conn(int fd)
     char persist = 1, *ptr;
     struct http_request req;
     struct http_response res;
-    struct path_handler *handler;
+    path_handler_t *handler;
     while (persist)
     {
         HTTP_request_init(&req);
@@ -134,7 +147,7 @@ void handle_conn(int fd)
                 res.code = 413; /* Content Too Large */
             else
                 res.code = 400; /* Bad Request */
-            MAP_put(res.headers, "Connection", "close");
+            STRCASE_MAP_put(res.headers, "Connection", "close");
             persist = 0;
         }
         else if (strcmp(req.version, "HTTP/1.0") != 0 && strcmp(req.version, "HTTP/1.1") != 0)
@@ -145,15 +158,15 @@ void handle_conn(int fd)
         {
             if (debug)
                 HTTP_print_request(&req);
-            ptr = MAP_get(req.headers, "Connection");
+            ptr = STRCASE_MAP_get(req.headers, "Connection");
             if (ptr != NULL && strcmp(ptr, "close") == 0 || strcmp(req.version, "HTTP/1.0") == 0 && (ptr == NULL || strcmp(ptr, "keep-alive") != 0))
             {
-                MAP_put(res.headers, "Connection", "close");
+                STRCASE_MAP_put(res.headers, "Connection", "close");
                 persist = 0;
             }
             else
             {
-                MAP_put(res.headers, "Connection", "keep-alive");
+                STRCASE_MAP_put(res.headers, "Connection", "keep-alive");
             }
             if (strcmp(req.method, "CONNECT") == 0 || strcmp(req.method, "TRACE") == 0)
             {
@@ -163,7 +176,7 @@ void handle_conn(int fd)
             {
                 res.code = 404; // Not Found
             }
-            else if ((handler = (struct path_handler *)MAP_get(handlers, req.target->path)) != NULL)
+            else if ((handler = HANDLER_MAP_get(handlers, req.target->path)) != NULL)
             {
                 /* call handler based on request method */
                 if ((strcmp(req.method, "GET") == 0 || strcmp(req.method, "HEAD") == 0) && handler->get != NULL)
@@ -195,8 +208,8 @@ void handle_conn(int fd)
                         res.code = 405; /* Method Not Allowed */
                     /* generate allow header */
                     ptr = generate_allow(handler);
-                    STACK_push(res.stack, ptr);
-                    MAP_put(res.headers, "Allow", ptr);
+                    MEM_STACK_push(res.stack, ptr);
+                    STRCASE_MAP_put(res.headers, "Allow", ptr);
                 }
             }
             else if (default_handler != NULL)
@@ -228,51 +241,60 @@ void handle_default(struct http_request *req, struct http_response *res)
 {
     struct stat path_stat;
     char *path = malloc(strlen(req->target->path) + 2);
-    STACK_push(res->stack, path);
     *path = '.';
     strcpy(path + 1, req->target->path);
     if (access(path, F_OK) == 0 && stat(path, &path_stat) == 0 && S_ISREG(path_stat.st_mode))
     {
         if (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)
         {
-            /* assets are assumed to be immutable */
+            MEM_STACK_push(res->stack, path);
+            // Cache-Control
             if (strncmp(req->target->path, "/assets/", 8) == 0)
-                MAP_put(res->headers, "Cache-Control", "max-age=31536000");
+                // assets are assumed to be immutable
+                STRCASE_MAP_put(res->headers, "Cache-Control", "max-age=31536000");
+            // Content-Type
             char *content_type = "*";
-            int index = strlastindexof(req->target->path, '.');
+            int32_t index = strlastindexof(req->target->path, '.');
             if (index >= 0)
-                /* infer content type from extension */
+                // infer content type from extension */
                 content_type = HTTP_content_type(req->target->path + index + 1);
-            MAP_put(res->headers, "Content-Type", content_type);
+            STRCASE_MAP_put(res->headers, "Content-Type", content_type);
             res->file = path;
         }
         else
         {
+            free(path);
             /* OPTIONS request or method with no handler */
             if (strcmp(req->method, "OPTIONS") == 0)
                 res->code = 204; /* No Content */
             else
                 res->code = 405; /* Method Not Allowed */
-            MAP_put(res->headers, "Allow", "GET, HEAD");
+            STRCASE_MAP_put(res->headers, "Allow", "GET, HEAD");
         }
     }
     else
     {
+        free(path);
         res->code = 404; /* Not Found */
     }
 }
 
 void handle_index_get(struct http_request *req, struct http_response *res)
 {
-    MAP_put(res->headers, "Content-Type", "text/html");
+    STRCASE_MAP_put(res->headers, "Content-Type", "text/html");
     res->file = "./index.html";
 }
 
 void handle_favicon_get(struct http_request *req, struct http_response *res)
 {
-    MAP_put(res->headers, "Cache-Control", "max-age=31536000");
-    MAP_put(res->headers, "Content-Type", "image/svg+xml");
+    STRCASE_MAP_put(res->headers, "Cache-Control", "max-age=31536000");
+    STRCASE_MAP_put(res->headers, "Content-Type", "image/svg+xml");
     res->file = "./favicon.svg";
+}
+
+void *print_help()
+{
+    printf("Usage: server [OPTION]... [PORT]\nStart an HTTP server on the PORT (%d by default).\n\n  -d, --debug                prints debug messages to the console\n      --help                 display this help and exit\n", PORT);
 }
 
 void *thread_main(void *arg)
@@ -338,24 +360,42 @@ int main(int argc, char **argv)
     for (int i = 1, j = 0; i < argc; i++)
     {
         char *ptr = argv[i];
-        if (*ptr == '-')
+        if (*ptr == '-' && ptr[1] != '\0')
         {
-            char c = ptr[1];
-            if (isalnum(c))
+            ptr++;
+            if (*ptr == '-')
             {
-                fprintf(stderr, "invalid option -- '%c'\n", c);
-                return 1;
-            }
-            else if (c == '-')
-            {
-                if (strcmp(ptr + 2, "debug") == 0)
+                ptr++;
+                if (strcmp(ptr, "debug") == 0)
                 {
                     debug = true;
                 }
+                else if (strcmp(ptr, "help") == 0)
+                {
+                    print_help();
+                    return 0;
+                }
                 else
                 {
-                    fprintf(stderr, "unrecognized option '%s'\n", ptr);
+                    fprintf(stderr, "unrecognized option '%s'\n", ptr - 2);
                     return 1;
+                }
+            }
+            else
+            {
+                while (*ptr != '\0')
+                {
+                    char c = *ptr;
+                    if (c == 'd')
+                    {
+                        debug = true;
+                    }
+                    else
+                    {
+                        fprintf(stderr, "invalid option -- '%c'\n", c);
+                        return 1;
+                    }
+                    ptr++;
                 }
             }
         }

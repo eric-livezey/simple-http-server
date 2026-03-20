@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stdio.h>
 #include "utils.h"
-#include "hashmap.h"
 
 /// @brief Represents a Uniform Resource Identifier (URI) reference.
 struct uri
@@ -61,9 +60,13 @@ void URI_init(struct uri *uri)
 /// @param query Query
 /// @param fragment Fragment
 /// @return The URI
-struct uri *URI_new_r(char *scheme, char *user_info, char *host, int port, char *path, char *query, char *fragment)
+struct uri *URI_new_r(char *scheme, char *user_info, char *host, int32_t port, char *path, char *query, char *fragment)
 {
     struct uri *uri = malloc(sizeof(struct uri));
+    if (uri == NULL)
+    {
+        return NULL;
+    }
     URI_init_r(uri, scheme, user_info, host, port, path, query, fragment);
     return uri;
 }
@@ -212,6 +215,10 @@ int URI_tostr_ex(struct uri *uri, char *buf)
 char *URI_tostr(struct uri *uri)
 {
     char *buf = malloc(URI_size(uri));
+    if (buf == NULL)
+    {
+        return NULL;
+    }
     URI_tostr_ex(uri, buf);
     return buf;
 }
@@ -395,7 +402,6 @@ int scan_ipv4_address(char *ptr, char **endptr)
 // Then the last two segments can be an ipv4
 int scan_ipv6_address(char *ptr, char **endptr)
 {
-    
     char *ep = ptr, n = 0;
     bool short_form = false, seg = true;
     while (n < 8)
@@ -636,7 +642,7 @@ int parse_authority(char *ptr, char **endptr, struct uri *uri)
 //                / path-absolute
 //                / path-rootless
 //                / path-empty
-int parse_absolute_URI(char *ptr, char **endptr, struct uri *uri, STACK *stack)
+int parse_absolute_URI(char *ptr, char **endptr, struct uri *uri, MEM_STACK *stack)
 {
     char *p = ptr, *ep = ptr, *src;
     int n;

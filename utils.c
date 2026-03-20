@@ -7,134 +7,58 @@
 #include <time.h>
 #include <netinet/in.h>
 #include <string.h>
-
-typedef struct node_s
-{
-    void *data;
-    struct node_s *prev;
-} NODE;
-
-/// @brief Represents a stack.
-typedef struct stack_s
-{
-    NODE *head;
-    int size;
-} STACK;
-
-NODE *NODE_new(void *data, NODE *prev)
-{
-    NODE *node = malloc(sizeof(NODE));
-    node->data = data;
-    node->prev = prev;
-    return node;
-}
-
-NODE *NODE_free(NODE *n)
-{
-    free(n->data);
-    NODE *prev = n->prev;
-    free(n);
-    return prev;
-}
-
-/// @brief Initializes an empty stack.
-/// @param s The stack
-void STACK_init(STACK *s)
-{
-    s->head = NULL;
-    s->size = 0;
-}
-
-/// @brief Constructs an empty stack.
-/// @return The stack
-STACK *STACK_new()
-{
-    STACK *s = malloc(sizeof(STACK));
-    STACK_init(s);
-    return s;
-}
-
-/// @brief Pops an item from from the stack and returns it.
-/// @param s The stack
-/// @return The data
-void *STACK_pop(STACK *s)
-{
-    NODE *node = s->head;
-    s->head = node->prev;
-    void *data = node->data;
-    free(node);
-    s->size--;
-    return data;
-}
-
-/// @brief Pushes an item onto the stack.
-/// @param s The stack
-/// @param data The data
-void STACK_push(STACK *s, void *data)
-{
-    s->head = NODE_new(data, s->head);
-    s->size++;
-}
-
-/// @brief Returns the size of the stack.
-/// @param s The stack
-/// @return The size of the stack
-int STACK_size(STACK *s)
-{
-    return s->size;
-}
-
-/// @brief Returns whether or not the stack is empty.
-/// @param s The stack
-/// @return `true` if the stack is empty, else `false`
-bool STACK_empty(STACK *s)
-{
-    return s->head == NULL;
-}
-
-/// @brief Sequentially frees all memory in the stack. Assumes all data is allocated memory and frees it.
-/// @param s The stack
-void STACK_free(STACK *s)
-{
-    NODE *node = s->head;
-    while (node != NULL)
-    {
-        node = NODE_free(node);
-    }
-    free(s);
-}
+#include "types.h"
 
 typedef struct buffer_s
 {
     uint8_t *data;
-    uint64_t size;
-    uint64_t capacity;
+    size_t size;
+    size_t capacity;
 } BUFFER;
 
 /// @brief Initializes a buffer.
 /// @param sb The buffer
-/// @param capacity The initial capacity
-void BUFFER_init(BUFFER *b, uint64_t capacity)
+/// @param capacity The capacity
+void BUFFER_init(BUFFER *b, size_t capacity)
 {
-    b->data = malloc(capacity);
-    b->size = 0;
-    b->capacity = capacity;
+    *b = (BUFFER){.data = malloc(capacity), .size = 0, .capacity = capacity};
 }
 
 /// @brief Creates a new buffer.
-/// @param capacity The length
+/// @param capacity The capacity
 /// @return The new buffer
-BUFFER *BUFFER_new(uint64_t capacity)
+BUFFER *BUFFER_new(size_t capacity)
 {
     BUFFER *b = malloc(sizeof(BUFFER));
     BUFFER_init(b, capacity);
     return b;
 }
 
+/// @brief Creates a new buffer from an existing pointer.
+/// @param data The pointer
+/// @param size The size of the data
+/// @param capacity The capacity
+/// @return The new buffer
+BUFFER *BUFFER_from_r(void *data, size_t size, size_t capacity)
+{
+    BUFFER *b = malloc(sizeof(BUFFER));
+    *b = (BUFFER){.data = data, size = size, capacity = capacity};
+    return b;
+}
+
+/// @brief Creates a new buffer from an existing pointer.
+/// @param data The pointer
+/// @param size The size of the data
+/// @return The new buffer
+BUFFER *BUFFER_from(void *data, size_t size)
+{
+    return BUFFER_from_r(data, size, size);
+}
+
 /// @brief Returns the size of the buffer.
 /// @param b The buffer
 /// @return The size of the buffer
-uint64_t BUFFER_size(BUFFER *b)
+size_t BUFFER_size(BUFFER *b)
 {
     return b->size;
 }
@@ -144,9 +68,9 @@ uint64_t BUFFER_size(BUFFER *b)
 /// @param data The data
 /// @param n The number of bytes to copy
 /// @return The number of bytes pushed
-uint64_t BUFFER_push(BUFFER *b, uint8_t *data, uint64_t n)
+size_t BUFFER_push(BUFFER *b, uint8_t *data, size_t n)
 {
-    uint64_t p = 0;
+    size_t p = 0;
     while (p < n && b->size < b->capacity)
     {
         b->data[b->size++] = data[p++];
@@ -172,7 +96,7 @@ bool BUFFER_pushb(BUFFER *b, uint8_t byte)
 /// @param b The buffer
 /// @param str The string to push
 /// @return The number of characters pushed
-uint64_t BUFFER_sprint(BUFFER *b, char *s)
+size_t BUFFER_sprint(BUFFER *b, char *s)
 {
     char *ptr = s;
     while (*ptr && b->size < b->capacity)
@@ -186,11 +110,11 @@ uint64_t BUFFER_sprint(BUFFER *b, char *s)
 /// @param b The buffer
 /// @param format The format string
 /// @return The number of characters written
-int BUFFER_sprintf(BUFFER *b, char *format, ...)
+int32_t BUFFER_sprintf(BUFFER *b, char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    int size = vsnprintf(b->data + b->size, b->capacity - b->size, format, args);
+    int32_t size = vsnprintf(b->data + b->size, b->capacity - b->size, format, args);
     b->size += size;
     va_end(args);
     return size;
@@ -199,9 +123,9 @@ int BUFFER_sprintf(BUFFER *b, char *format, ...)
 /// @brief Pops up to N bytes from the buffer and places them into result.
 /// @param n The number of bytes to pop
 /// @return The numbers of bytes popped
-uint64_t BUFFER_pop(BUFFER *b, uint64_t n, uint8_t *result)
+size_t BUFFER_pop(BUFFER *b, size_t n, uint8_t *result)
 {
-    uint64_t p = n;
+    size_t p = n;
     while (p > 0 && b->size > 0)
     {
         result[n - p--] = b->data[n - b->size--];
@@ -222,7 +146,7 @@ uint8_t *BUFFER_get(BUFFER *b)
 /// @brief Places the buffer content in the result and frees the struct.
 /// @param b The buffer
 /// @return The size of the buffer
-uint64_t BUFFER_get_ex(BUFFER *b, uint8_t **result)
+size_t BUFFER_get_ex(BUFFER *b, uint8_t **result)
 {
     uint64_t size = b->size;
     *result = BUFFER_get(b);
@@ -464,13 +388,13 @@ int32_t scann_str(char *ptr, char **endptr, int32_t n, char *str)
 /// @param src The source string
 /// @param n Number of characters to copy
 /// @return The newly allocated string
-char *strnalloc(char *src, size_t n, STACK *stack)
+char *strnalloc(const char *src, size_t n, MEM_STACK *stack)
 {
     char *result;
     if (n > 0)
     {
         result = malloc(n + 1);
-        STACK_push(stack, result);
+        MEM_STACK_push(stack, result);
         strncpy(result, src, n);
         result[n] = '\0';
     }
@@ -488,36 +412,60 @@ long double gettime()
     return (ts.tv_sec + ts.tv_nsec / 1000000000.0L) * 1000.0L;
 }
 
-bool send_file(int fd, FILE *fp, unsigned long begin, unsigned long end)
+#define BUFFER_SIZE UINT16_MAX
+
+/// @brief Sends a file over a socket
+/// @param fd The socket file descriptor
+/// @param fp The file pointer
+/// @param offset The offset
+/// @param n The number of bytes to send
+/// @return The number if bytes sent
+ssize_t send_file(int32_t fd, FILE *fp, int64_t offset, int64_t n)
 {
-    if (begin < 0 || end < begin)
+    if (offset < 0 || n < 0)
+        return -1;
+    if (n == 0)
         return 0;
-    char buffer[65535];
-    unsigned short nread, written;
-    unsigned long sent = 0, size = end - begin + 1;
-    fseek(fp, begin, SEEK_SET);
-    while (sent < size)
+    int32_t nread, nsent;
+    ssize_t total = 0;
+    fseek(fp, offset, SEEK_SET);
+    if (ftell(fp) < offset)
+        // The file is smaller than the offset, so send 0 bytes
+        return 0;
+    uint8_t *buffer = malloc(BUFFER_SIZE);
+    do
     {
-        nread = fread(buffer, 1, sizeof(buffer), fp);
-        written = send(fd, buffer, nread, MSG_NOSIGNAL);
-        if (written < 0)
-            return false;
-        if (written < nread)
-            fseek(fp, nread - written, SEEK_CUR);
-        sent += written;
-        fflush(fp);
-    }
-    return true;
+        nread = fread(buffer, 1, BUFFER_SIZE, fp);
+        if (nread < 0)
+        {
+            // Error while reading, so exit
+            free(buffer);
+            return -1;
+        }
+        if (nread == 0)
+            // 0 bytes were read, so break
+            break;
+        nsent = send(fd, buffer, nread, MSG_NOSIGNAL);
+        if (nsent < 0)
+        {
+            // Error while sending, so exit
+            free(buffer);
+            return -1;
+        }
+        if (nsent < nread)
+            // Less bytes were sent than read, so seek to the last byte sent
+            fseek(fp, nread - nsent, SEEK_CUR);
+        total += nsent;
+    } while (total < n && nread == BUFFER_SIZE);
+    free(buffer);
+    return total;
 }
 
-uint8_t *buffcat(uint8_t *buff1, unsigned long n1, uint8_t *buff2, unsigned long n2)
+uint8_t *buffcat(uint8_t *buff1, size_t n1, uint8_t *buff2, size_t n2)
 {
     uint8_t *buff = malloc(n1 + n2);
-    unsigned int i;
-    for (i = 0; i < n1; i++)
-        buff[i] = buff1[i];
-    for (i = 0; i < n2; i++)
-        buff[i + n1] = buff2[i];
+    memcpy(buff, buff1, n1);
+    memcpy(buff + n1, buff2, n2);
     return buff;
 }
 
@@ -595,32 +543,4 @@ int numlenul(unsigned long x)
         i++;
     }
     return i;
-}
-
-int log2floor(int x)
-{
-    int log = 0;
-    if (x <= 0) // invalid logarithm
-        return -1;
-    while (x >= 2)
-    {
-        x >>= 1;
-        log++;
-    }
-    return log;
-}
-
-int log2ceil(int x)
-{
-    int log = 0;
-    if (x <= 0) // invalid logarithm
-        return -1;
-    x <<= 1;
-    x--;
-    while (x >= 2)
-    {
-        x >>= 1;
-        log++;
-    }
-    return log;
 }
