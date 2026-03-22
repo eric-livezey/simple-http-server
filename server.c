@@ -242,7 +242,7 @@ void handle_default(struct http_request *req, struct http_response *res)
     struct stat path_stat;
     char *path = malloc(strlen(req->target->path) + 2);
     *path = '.';
-    strcpy(path + 1, req->target->path);
+    urldecode(path + 1, req->target->path);
     if (access(path, F_OK) == 0 && stat(path, &path_stat) == 0 && S_ISREG(path_stat.st_mode))
     {
         if (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)
