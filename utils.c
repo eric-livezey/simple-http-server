@@ -456,7 +456,7 @@ ssize_t send_file(int32_t fd, FILE *fp, int64_t offset, int64_t n)
             // Less bytes were sent than read, so seek to the last byte sent
             fseek(fp, nread - nsent, SEEK_CUR);
         total += nsent;
-    } while (total < n && nsent == BUFFER_SIZE);
+    } while (total < n && (nread > nsent || nsent == BUFFER_SIZE));
     free(buffer);
     return total;
 }
