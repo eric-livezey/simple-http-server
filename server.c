@@ -143,10 +143,14 @@ void handle_conn(int fd)
                 HTTP_response_free(&res);
                 break;
             }
-            if ((req.flags & CONTENT_TOO_LARGE) != 0)
-                res.code = 413; /* Content Too Large */
+            if (req.flags & CONTENT_TOO_LARGE)
+                res.code = 413; // Content Too Large
+            else if (req.flags & EXPECTATION_FAILED)
+                res.code = 417; // Expectation Failed
+            else if (req.flags & NOT_IMPLEMENTED)
+                res.code = 501; // Not Implemented
             else
-                res.code = 400; /* Bad Request */
+                res.code = 400; // Bad Request
             STRCASE_MAP_put(res.headers, "Connection", "close");
             persist = 0;
         }
@@ -257,7 +261,7 @@ void handle_default(struct http_request *req, struct http_response *res)
             int32_t index = strlastindexof(req->target->path, '.');
             if (index >= 0)
                 // infer content type from extension */
-                content_type = HTTP_content_type(req->target->path + index + 1);
+                content_type = infer_media_type(req->target->path + index + 1);
             STRCASE_MAP_put(res->headers, "Content-Type", content_type);
             res->file = path;
         }

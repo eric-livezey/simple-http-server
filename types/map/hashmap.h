@@ -12,12 +12,13 @@ typedef int32_t cmpfn(const void *a, const void *b);
 /// @brief Represents an map entry with a key and a value.
 /// @note This is equivalent to a struct with a format of `{ key, value }`, but it cannot be
 /// properly defined as such in c since the types of the key and value are unknown
-typedef void *ENTRY;
+typedef void ENTRY;
 /// @brief Represents a map
 typedef struct hashmap_s MAP;
 MAP *MAP_new_r(size_t key_size, size_t value_size, hashfn *khashfn, cmpfn *kcmpfn,
                float load_factor, int32_t initial_capacity);
 MAP *MAP_new(size_t key_size, size_t value_size, hashfn *khashfn, cmpfn *kcmpfn);
+MAP *MAP_from_entries(size_t key_size, size_t value_size, hashfn *khashfn, cmpfn *kcmpfn, const ENTRY *entries, int32_t size);
 int32_t MAP_size(const MAP *map);
 void MAP_clear(MAP *map);
 ENTRY **MAP_entry_set(MAP *map);

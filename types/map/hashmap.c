@@ -16,7 +16,7 @@ typedef uint32_t hashfn(const void *value);
 typedef int32_t cmpfn(const void *a, const void *b);
 
 // Represents a node
-typedef void *NODE;
+typedef void NODE;
 #define NODE_HASH_TYPE uint32_t
 #define NODE_HASH(n) *(NODE_HASH_TYPE *)(n)
 #define NODE_NEXT_OFFSET sizeof(NODE_HASH_TYPE)
@@ -60,7 +60,7 @@ static NODE *NODE_new(uint32_t hash, const void *key, size_t key_size, const voi
 }
 
 // Represents a map entry
-typedef void *ENTRY;
+typedef void ENTRY;
 #define ENTRY_KEY_PTR(n) (n)
 #define ENTRY_KEY_CPY(n, p, ks) memcpy(ENTRY_KEY_PTR(n), p, ks)
 #define ENTRY_VALUE_OFFSET(ks) (ks)
@@ -461,6 +461,37 @@ static void MAP_put_map_entries(MAP *map, MAP *m)
 void MAP_put_all(MAP *map, MAP *m)
 {
     MAP_put_map_entries(map, m);
+}
+
+/// @brief Constructs a new map with the given parameters, and initializes it with the given entries.
+/// @param key_size The size of the key's data type
+/// @param value_size The size of the value's data type
+/// @param khashfn The function to hash a key
+/// @param kcmpfn The function to compare two keys
+/// @param entries An array of entries
+/// @param size The number of elements in the array
+/// @return The map
+MAP *MAP_from_entries(size_t key_size, size_t value_size, hashfn *khashfn, cmpfn *kcmpfn, const ENTRY *entries, int32_t size)
+{
+    MAP *m = MAP_new(key_size, value_size, khashfn, kcmpfn);
+    if (m == NULL)
+        return NULL;
+    if (size > 0)
+    {
+        int32_t ks = m->key_size;
+        // presize
+        float ft = ((float)size / m->load_factor) + 1.0F;
+        int32_t t = ((ft < (float)MAXIMUM_CAPACITY) ? (int32_t)ft : MAXIMUM_CAPACITY);
+        if (t > m->threshold)
+            m->threshold = table_size_for(t);
+        // entries
+        for (int32_t i = 0; i < size; i++)
+        {
+            const ENTRY *e = entries + i * ENTRY_SIZE(ks, m->value_size);
+            MAP_put_val(m, m->khashfn(ENTRY_KEY_PTR(e)), ENTRY_KEY_PTR(e), ENTRY_VALUE_PTR(e, ks), false, NULL);
+        }
+    }
+    return m;
 }
 
 // Returns the node which has the given key

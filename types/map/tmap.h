@@ -34,6 +34,10 @@ static inline LABEL *NAME(new)()
 {
     return MAP_new(sizeof(KEY_TYPE), sizeof(VALUE_TYPE), &KEY_HASH, &KEY_CMP);
 }
+static inline LABEL *NAME(from_entries)(const NAME(entry_t)  *entries, int32_t size)
+{
+    return MAP_from_entries(sizeof(KEY_TYPE), sizeof(VALUE_TYPE), &KEY_HASH, &KEY_CMP, entries, size);
+}
 static inline int32_t NAME(size)(const LABEL *map)
 {
     return MAP_size(map);

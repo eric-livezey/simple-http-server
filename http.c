@@ -74,6 +74,8 @@ static const uint64_t H_ETAGC = H_OBS_TEXT | H_VCHAR;
 
 // 8 MiB
 #define MAX_LINE_SIZE 0x800000
+// 8 GiB
+#define MAX_CONTENT_SIZE 0x200000000
 #define BUFFER_SIZE UINT16_MAX
 
 enum FLAGS
@@ -82,7 +84,9 @@ enum FLAGS
     PARSE_ERROR = 0x2,
     BAD_CONTENT_LENGTH = 0x4,
     CONTENT_TOO_LARGE = 0x8,
-    CONNECTION_CLOSED = 0x10
+    CONNECTION_CLOSED = 0x10,
+    EXPECTATION_FAILED = 0x20,
+    NOT_IMPLEMENTED = 0x40
 };
 
 struct part
@@ -96,7 +100,7 @@ struct multipart
 {
     struct part **parts;
     int32_t length;
-    MEM_STACK *stack;
+    MEM_STACK *mem;
 };
 
 struct media_type
@@ -326,57 +330,41 @@ char *HTTP_reason(uint16_t code)
     }
 }
 
-STRCASE_MAP *content_type_map = NULL;
-bool content_type_map_initialized = false;
+STRCASE_MAP *media_types_by_file_extension = NULL;
+bool is_media_types_by_file_type_extension_initialized = false;
 
-char *HTTP_content_type(char *ext)
+char *infer_media_type(char *ext)
 {
-    if (!content_type_map_initialized)
+    if (!is_media_types_by_file_type_extension_initialized)
     {
-        STRCASE_MAP *map = STRCASE_MAP_new();
-        // video/matroska
-        STRCASE_MAP_put(map, "mkv", "video/matroska");
-        // video/matroska-3d
-        STRCASE_MAP_put(map, "mk3d", "video/matroska-3d");
-        // audio/matroska
-        STRCASE_MAP_put(map, "mka", "audio/matroska");
-        // application/octet-stream
-        STRCASE_MAP_put(map, "mks", "application/octet-stream");
-        // video/mp4
-        STRCASE_MAP_put(map, "mp4", "video/mp4");
-        STRCASE_MAP_put(map, "m4g4", "video/mp4");
-        // audio/mpeg
-        STRCASE_MAP_put(map, "mp3", "audio/mpeg");
-        // video/webm
-        STRCASE_MAP_put(map, "webm", "video/webm");
-        // image/webp
-        STRCASE_MAP_put(map, "webp", "image/webp");
-        // image/svg+xml
-        STRCASE_MAP_put(map, "svg", "image/svg+xml");
-        STRCASE_MAP_put(map, "svgz", "image/svg+xml");
-        // image/jpeg
-        STRCASE_MAP_put(map, "jpg", "image/jpeg");
-        STRCASE_MAP_put(map, "jpeg", "image/jpeg");
-        // image/png
-        STRCASE_MAP_put(map, "png", "image/png");
-        // image/gif
-        STRCASE_MAP_put(map, "gif", "image/gif");
-        // text/javascript
-        STRCASE_MAP_put(map, "js", "text/javascript");
-        STRCASE_MAP_put(map, "mjs", "text/javascript");
-        // application/json
-        STRCASE_MAP_put(map, "json", "application/json");
-        // text/html
-        STRCASE_MAP_put(map, "html", "text/html");
-        STRCASE_MAP_put(map, "htm", "text/html");
-        // text/css
-        STRCASE_MAP_put(map, "css", "text/css");
-        // text/plain
-        STRCASE_MAP_put(map, "txt", "text/plain");
-        content_type_map = map;
-        content_type_map_initialized = true;
+        const STRCASE_MAP_entry_t entries[] = {
+            {.key = "mkv", .value = "video/matroska"},
+            {.key = "mk3d", .value = "video/matroska-3d"},
+            {.key = "mka", .value = "audio/matroska"},
+            {.key = "mks", .value = "application/octet-stream"},
+            {.key = "mp4", .value = "video/mp4"},
+            {.key = "m4g4", .value = "video/mp4"},
+            {.key = "mp3", .value = "audio/mpeg"},
+            {.key = "webm", .value = "video/webm"},
+            {.key = "webp", .value = "image/webp"},
+            {.key = "svg", .value = "image/svg+xml"},
+            {.key = "svgz", .value = "image/svg+xml"},
+            {.key = "jpg", .value = "image/jpeg"},
+            {.key = "jpeg", .value = "image/jpeg"},
+            {.key = "png", .value = "image/png"},
+            {.key = "gif", .value = "image/gif"},
+            {.key = "js", .value = "text/javascript"},
+            {.key = "mjs", .value = "text/javascript"},
+            {.key = "json", .value = "application/json"},
+            {.key = "html", .value = "text/html"},
+            {.key = "htm", .value = "text/html"},
+            {.key = "css", .value = "text/css"},
+            {.key = "txt", .value = "text/plain"}};
+        media_types_by_file_extension = STRCASE_MAP_from_entries(entries, sizeof(entries) /
+                                                                              sizeof(STRCASE_MAP_entry_t));
+        is_media_types_by_file_type_extension_initialized = true;
     }
-    return STRCASE_MAP_get_or_default(content_type_map, ext, "*");
+    return STRCASE_MAP_get_or_default(media_types_by_file_extension, ext, "*");
 }
 
 uint64_t HTTP_reqsize(struct http_request *req, bool head)
@@ -1451,7 +1439,7 @@ int32_t scan_first_boundary_line(char *ptr, char **endptr, int32_t *nptr, char *
 /// delimiter       = CRLF dash-boundary
 /// close-delimiter = delimiter "--"
 /// ```
-bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipart *mp)
+bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipart *dest)
 {
     bool done = false;
     char c, *p, *ep = ptr, *v;
@@ -1504,7 +1492,7 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
                 v = buffcat(v, strlen(v), ", ", 3);
                 e.key = buffcat(v, strlen(v), e.value, strlen(e.value) + 1);
                 free(v);
-                MEM_STACK_push(mp->stack, e.key);
+                MEM_STACK_push(dest->mem, e.key);
             }
             STRCASE_MAP_put(part->headers, e.key, e.value);
         }
@@ -1607,9 +1595,9 @@ bool parse_multipart_body(char *ptr, uint64_t n, char *boundary, struct multipar
         }
         rem -= smax - srem;
     }
-    mp->parts = parts;
-    mp->length = length;
-    MEM_STACK_push(mp->stack, parts);
+    dest->parts = parts;
+    dest->length = length;
+    MEM_STACK_push(dest->mem, parts);
     return rem == 0;
 }
 
@@ -1799,7 +1787,7 @@ struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
     char *data, *temp, *v;
     uint16_t size = BUFFER_SIZE;
     ssize_t ret;
-    uint64_t bytes;
+    uint64_t total = 0, bytes;
     STR_MAP_entry_t e;
     struct chunk chunk;
     chunk.extension = STR_MAP_new();
@@ -1811,6 +1799,12 @@ struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
     }
     while (chunk.size > 0)
     {
+        if (total + chunk.size > MAX_CONTENT_SIZE)
+        {
+            STR_MAP_free(chunk.extension);
+            result->flags |= CONTENT_TOO_LARGE;
+            return NULL;
+        }
         chunk.content = malloc(chunk.size);
         bytes = 0;
         while (bytes < chunk.size)
@@ -1847,6 +1841,7 @@ struct http_request *HTTP_recv_chunks(int fd, struct http_request *result)
             STR_MAP_free(chunk.extension);
             return NULL;
         }
+        total += bytes;
     }
     MEM_STACK_push(result->stack, result->content);
     while (1)
@@ -2002,6 +1997,7 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
 {
     char *data = NULL, *temp, *ep, *v;
     int32_t ret;
+    uint64_t content_length;
     STRCASE_MAP_entry_t e;
     result->method = NULL;
     result->version = NULL;
@@ -2032,6 +2028,41 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
         }
         STRCASE_MAP_put(result->headers, e.key, e.value);
     }
+    // expectations
+    bool has_content_length = (v = STRCASE_MAP_get(result->headers, "Content-Length")) != NULL;
+    if (has_content_length)
+    {
+        content_length = strtoul(v, &ep, 10);
+        if (*v == '\0' || *ep != '\0')
+        {
+            result->flags |= BAD_CONTENT_LENGTH;
+            return NULL;
+        }
+        if (content_length > MAX_CONTENT_SIZE) // 8 GB limit
+        {
+            result->flags |= CONTENT_TOO_LARGE;
+            return NULL;
+        }
+    }
+    // expect
+    if ((v = STRCASE_MAP_get(result->headers, "Expect")) != NULL && *v != '\0')
+    {
+        if (strcasecmp(v, "100-continue") == 0)
+        {
+            // Send a 100 Continue to indicate that expectations passed
+            struct http_response res;
+            HTTP_response_init(&res);
+            res.code = 100;
+            res.reason = HTTP_reason(res.code);
+            HTTP_send_response(&res, fd, false);
+            HTTP_response_free(&res);
+        }
+        else
+        {
+            result->flags |= EXPECTATION_FAILED;
+            return NULL;
+        }
+    }
     // message body
     if ((v = STRCASE_MAP_get(result->headers, "Transfer-Encoding")) != NULL && *v != '\0')
     {
@@ -2057,29 +2088,17 @@ struct http_request *HTTP_recvreq(int fd, struct http_request *result)
             }
             ptr++;
         }
-        for (i = 0; i < len; i++)
-            if (strcasecmp(encodings[i], "chunked") == 0)
-                HTTP_recv_chunks(fd, result);
+        // Chunked tranfer encoding
+        if (len == 1 && strcasecmp(encodings[0], "chunked") == 0)
+            HTTP_recv_chunks(fd, result);
+        else
+        {
+            result->flags |= NOT_IMPLEMENTED;
+            return NULL;
+        }
     }
-    else if (STRCASE_MAP_contains_key(result->headers, "Content-Length"))
+    else if (has_content_length)
     {
-        char *ptr, *endptr;
-        uint64_t content_length = strtoull(ptr = STRCASE_MAP_get(result->headers, "Content-Length"),
-                                           &endptr, 10);
-        if (*ptr == '\0' || *endptr != '\0')
-        {
-            result->flags |= BAD_CONTENT_LENGTH;
-            return NULL;
-        }
-        if (content_length > 0x200000000) // 8 GB limit
-        {
-            // NOTE: if we don't read the request to completion, the client will likely not
-            // receive the response but reading the whole request will take far too long with 8GB+
-            // file sizes and thus waste resources so even though the request may be valid, we
-            // reject it immediately and close the connection.
-            result->flags |= CONTENT_TOO_LARGE;
-            return NULL;
-        }
         result->content = malloc(content_length);
         uint16_t size = BUFFER_SIZE;
         uint64_t bytes = 0;

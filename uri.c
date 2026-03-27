@@ -252,7 +252,7 @@ static const uint64_t H_HEX = 0x7E0000007E;
 // The zero'th bit is used to indicate that escape pairs are allowed
 // this is handled by the scan_escape method below.
 static const uint64_t L_ESCAPED = 0x1;
-static const uint64_t H_ESCAPED = 0x1;
+static const uint64_t H_ESCAPED = 0x0;
 
 // sub-delims    = "!" / "$" / "&" / "'" / "(" / ")"
 //               / "*" / "+" / "," / ";" / "="

@@ -4,11 +4,13 @@
 
 enum FLAGS
 {
-    CONNECTION_ERROR = 0b00000001,
-    PARSE_ERROR = 0b00000010,
-    BAD_CONTENT_LENGTH = 0b00000100,
-    CONTENT_TOO_LARGE = 0b00001000,
-    CONNECTION_CLOSED = 0b00010000
+    CONNECTION_ERROR = 0x1,
+    PARSE_ERROR = 0x2,
+    BAD_CONTENT_LENGTH = 0x4,
+    CONTENT_TOO_LARGE = 0x8,
+    CONNECTION_CLOSED = 0x10,
+    EXPECTATION_FAILED = 0x20,
+    NOT_IMPLEMENTED = 0x40
 };
 
 struct part
@@ -22,7 +24,7 @@ struct multipart
 {
     struct part **parts;
     int32_t length;
-    MEM_STACK *stack;
+    MEM_STACK *mem;
 };
 
 struct media_type
@@ -93,7 +95,7 @@ char *HTTP_date(struct tm *tm);
 
 char *HTTP_reason(uint16_t code);
 
-char *HTTP_content_type(char *ext);
+char *infer_media_type(char *ext);
 
 uint64_t HTTP_reqsize(struct http_request *req, bool head);
 
